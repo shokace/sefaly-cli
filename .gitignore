@@ -1,0 +1,19 @@
+# Built binary
+/sefaly
+/dist/
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.html
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local env overrides (the CLI doesn't read .env files but devs
+# sometimes drop one when testing against staging)
+.env
+.env.local
