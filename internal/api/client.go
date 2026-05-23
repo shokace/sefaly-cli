@@ -206,6 +206,15 @@ func (c *Client) Me(ctx context.Context) (*Me, error) {
 	return &resp.User, nil
 }
 
+// RevokeSelf soft-revokes the token this client is authenticating
+// with (flips revokedAt on the server-side AccessToken row). Wired
+// up to `sef logout` so logout is server-side, not just a local
+// clear. Idempotent: the server returns 200 whether or not the row
+// was already revoked.
+func (c *Client) RevokeSelf(ctx context.Context) error {
+	return c.doJSON(ctx, http.MethodDelete, "/api/cli/token", nil, nil)
+}
+
 // ---- File tree ----
 
 // Folder is one row from /api/files?tree=1's `folders` array. Names
