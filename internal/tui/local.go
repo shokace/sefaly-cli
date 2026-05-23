@@ -63,17 +63,28 @@ func (p *LocalPane) load() tea.Cmd {
 }
 
 // applyLoaded swaps in a fresh entry list. Called by Update when a
-// localLoadedMsg arrives. Resets the cursor / offset only when
-// the cwd actually changed — staying-put refreshes (Phase C: F5)
-// preserve the cursor.
+// localLoadedMsg arrives.
+//
+// Drops messages that don't match the current cwd: if the user
+// descended twice quickly (A→B→C), the load for B may complete
+// after we've already moved to C; we don't want B's entries to
+// flash up as C's. cwd is captured at descend time, so a stale
+// load is identified by `p.cwd != cwd`.
+//
+// Cursor/offset are reset by descend/ascend at navigation time
+// (so the brief loading frame shows row 0), not here. We do
+// defensively clamp the cursor to the new slice's bounds in case
+// a refresh-in-place (Phase C) returns fewer entries than before.
 func (p *LocalPane) applyLoaded(cwd string, entries []LocalEntry) {
 	if p.cwd != cwd {
+		return
+	}
+	p.entries = entries
+	p.loading = false
+	if p.cursor >= len(p.entries) {
 		p.cursor = 0
 		p.offset = 0
 	}
-	p.cwd = cwd
-	p.entries = entries
-	p.loading = false
 }
 
 // handleKey applies a navigation key to the local pane. Returns a
@@ -120,7 +131,7 @@ func (p *LocalPane) handleKey(msg tea.KeyMsg) tea.Cmd {
 		// "right" / "d" only descend (never ascend) — to keep the
 		// mental model "right = go deeper" consistent with the
 		// remote pane.
-		if len(p.entries) == 0 {
+		if p.cursor < 0 || p.cursor >= len(p.entries) {
 			return nil
 		}
 		sel := p.entries[p.cursor]
@@ -140,8 +151,19 @@ func (p *LocalPane) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// descend / ascend update p.cwd, reset cursor/offset/entries
+// IMMEDIATELY (so the next render shows the loading placeholder
+// for the new dir, not the stale entries from the old one), then
+// fire an async load. The entries-reset is the load-bearing part
+// — without it, pressing Enter again before the load completes
+// would index the old (potentially-larger) slice with a fresh-but-
+// stale cursor and panic when the indices don't line up.
+
 func (p *LocalPane) descend(name string) tea.Cmd {
 	p.cwd = filepath.Join(p.cwd, name)
+	p.cursor = 0
+	p.offset = 0
+	p.entries = nil
 	p.loading = true
 	return p.load()
 }
@@ -153,6 +175,9 @@ func (p *LocalPane) ascend() tea.Cmd {
 		return nil
 	}
 	p.cwd = parent
+	p.cursor = 0
+	p.offset = 0
+	p.entries = nil
 	p.loading = true
 	return p.load()
 }

@@ -104,7 +104,7 @@ func (p *RemotePane) handleKey(msg tea.KeyMsg, privKey []byte) tea.Cmd {
 		return nil
 
 	case "enter", "right", "d":
-		if len(p.entries) == 0 {
+		if p.cursor < 0 || p.cursor >= len(p.entries) {
 			return nil
 		}
 		sel := p.entries[p.cursor]
