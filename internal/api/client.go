@@ -93,6 +93,15 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	// CSRF gate on mutating routes (assertCsrfSafe in web app) checks
+	// that Origin matches the request URL's origin. Browsers set this
+	// automatically; CLI clients have to add it explicitly. Setting
+	// it to our own base URL passes the same-origin check — which is
+	// the only thing the server is gating on for non-cookie callers
+	// anyway. (CSRF is fundamentally a browser-cookie attack; Bearer
+	// auth isn't vulnerable to it because the attacker would need to
+	// know the token, not just an open browser session.)
+	req.Header.Set("Origin", c.BaseURL)
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
@@ -297,6 +306,127 @@ type FileURLResponse struct {
 func (c *Client) FileURL(ctx context.Context, fileID string) (*FileURLResponse, error) {
 	out := &FileURLResponse{}
 	if err := c.doJSON(ctx, http.MethodGet, "/api/files/"+fileID+"/url", nil, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ---- Upload ----
+
+// UploadInitRequest is the POST body for /api/files/upload/init.
+// Tiny on purpose — the server only needs sizeBytes (to pre-flight
+// the quota check + sign the presigned PUT with a fixed
+// content-length) and folderId (to authorize the caller against
+// any cross-owner WRITE share on a folder they don't own).
+type UploadInitRequest struct {
+	SizeBytes int    `json:"sizeBytes"`
+	FolderID  string `json:"folderId,omitempty"` // empty / unset → root
+}
+
+type UploadInitResponse struct {
+	UploadURL     string `json:"uploadUrl"`
+	FileID        string `json:"fileId"`
+	StoragePath   string `json:"storagePath"`
+	ContentLength int    `json:"contentLength"`
+	ExpiresIn     int    `json:"expiresInSeconds"`
+}
+
+func (c *Client) UploadInit(ctx context.Context, req *UploadInitRequest) (*UploadInitResponse, error) {
+	// folderId must be marshalled as null (NOT empty string) for the
+	// "root folder" case — the server's validator treats "" as
+	// missing-or-null but null is the cleaner wire signal. Roll our
+	// own body to avoid the omitempty + null contortions JSON tags
+	// would need.
+	type body struct {
+		SizeBytes int     `json:"sizeBytes"`
+		FolderID  *string `json:"folderId"`
+	}
+	b := body{SizeBytes: req.SizeBytes}
+	if req.FolderID != "" {
+		fid := req.FolderID
+		b.FolderID = &fid
+	}
+	out := &UploadInitResponse{}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/upload/init", &b, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UploadPut PUTs ciphertext to a presigned URL (typically R2). The
+// presign is signed against a specific Content-Length, so we MUST
+// send the matching size — anything else gets a 403 from R2. No
+// Bearer header (the auth is in the URL's query string). Same
+// Content-Type the browser uses: application/octet-stream, so the
+// original mimetype isn't leaked to network observers.
+func (c *Client) UploadPut(ctx context.Context, url string, ciphertext []byte) error {
+	dl := &http.Client{Timeout: 10 * time.Minute}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(ciphertext))
+	if err != nil {
+		return fmt.Errorf("building PUT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(ciphertext))
+	req.Header.Set("User-Agent", UserAgent)
+
+	resp, err := dl.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return &APIError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("storage PUT failed (%d): %s", resp.StatusCode, string(body)),
+		}
+	}
+	return nil
+}
+
+// UploadCompleteRequest matches POST /api/files/upload/complete's
+// validated body. `originalFilename` is intentionally null on every
+// CLI upload — we encrypt the filename client-side and ship the
+// ciphertext in `EncryptedFilename` + `FilenameNonce` so the server
+// never sees the plaintext. `ShareWraps` is reserved for the future
+// shared-folder upload path; CLI doesn't construct shares yet.
+type UploadCompleteRequest struct {
+	FileID             string                 `json:"fileId"`
+	StoragePath        string                 `json:"storagePath"`
+	OriginalFilename   *string                `json:"originalFilename"`
+	EncryptedFilename  string                 `json:"encryptedFilename"`
+	FilenameNonce      string                 `json:"filenameNonce"`
+	MimeType           *string                `json:"mimeType"`
+	FolderID           *string                `json:"folderId"`
+	EncapsulatedKey    string                 `json:"encapsulatedKey"`
+	WrappedFileKey     string                 `json:"wrappedFileKey"`
+	Nonce              string                 `json:"nonce"`
+	KeyWrapNonce       string                 `json:"keyWrapNonce"`
+	EncryptionMetadata map[string]interface{} `json:"encryptionMetadata"`
+	ShareWraps         []interface{}          `json:"shareWraps"`
+}
+
+type UploadCompleteResponse struct {
+	File struct {
+		ID                string  `json:"id"`
+		OriginalFilename  *string `json:"originalFilename"`
+		EncryptedFilename *string `json:"encryptedFilename"`
+		MimeType          *string `json:"mimeType"`
+		SizeBytes         string  `json:"sizeBytes"`
+		CreatedAt         string  `json:"createdAt"`
+		FolderID          *string `json:"folderId"`
+	} `json:"file"`
+}
+
+func (c *Client) UploadComplete(ctx context.Context, req *UploadCompleteRequest) (*UploadCompleteResponse, error) {
+	if req.ShareWraps == nil {
+		// The server validates `shareWraps` as required-array. Send
+		// an empty slice rather than nil to avoid encoding it as
+		// JSON `null`.
+		req.ShareWraps = []interface{}{}
+	}
+	out := &UploadCompleteResponse{}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/upload/complete", req, out); err != nil {
 		return nil, err
 	}
 	return out, nil

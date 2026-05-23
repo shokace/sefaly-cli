@@ -2,10 +2,12 @@ package cryptox
 
 import (
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
 )
@@ -183,6 +185,177 @@ func DecryptFileContent(
 // silently breaks decryption for every v1.2 file the user owns.
 func buildFileAAD(version, algorithm, kemType string) []byte {
 	return []byte(fmt.Sprintf("sefaly-file-aad|v=%s|alg=%s|kem=%s", version, algorithm, kemType))
+}
+
+// PublicKeyFromPrivate slices the encapsulation key (`ek`) out of
+// the FIPS 203 expanded decapsulation key. Saves a /api/auth/me
+// round-trip whenever we already have the user's private key in
+// memory — the public key is literally a substring of the private
+// key in the standardized layout:
+//
+//   dk = dkPKE (1152) || ek (1184) || H(ek) (32) || z (32) = 2400 bytes
+//
+// For ML-KEM-768 the ek slice is bytes [1152, 2336).
+func PublicKeyFromPrivate(privKeyBytes []byte) ([]byte, error) {
+	if len(privKeyBytes) != mlkem768.PrivateKeySize {
+		return nil, fmt.Errorf(
+			"private key must be %d bytes, got %d",
+			mlkem768.PrivateKeySize, len(privKeyBytes),
+		)
+	}
+	// Copy out so the caller can zero the private-key buffer without
+	// also wiping the public key.
+	pk := make([]byte, mlkem768.PublicKeySize)
+	copy(pk, privKeyBytes[1152:1152+mlkem768.PublicKeySize])
+	return pk, nil
+}
+
+// UploadCrypto bundles everything an upload needs to send: the
+// ciphertext that gets PUT to R2 plus the metadata that lands in
+// the File row via POST /api/files/upload/complete. Fields are
+// base64 because that's the wire format the complete endpoint
+// validates.
+type UploadCrypto struct {
+	// The encrypted file content (plaintext || GCM tag), AAD-bound
+	// to {version="1.2", algorithm="AES-256-GCM", kem="ML-KEM-768"}.
+	// Goes in the PUT body.
+	Ciphertext []byte
+
+	// ML-KEM-768 ciphertext encapsulating the per-file symmetric key
+	// against the user's public key. 1088 bytes, base64.
+	EncapsulatedKeyB64 string
+
+	// AES-GCM-wrapped file key (32-byte plaintext key + 16-byte tag),
+	// base64. Recovered via UnwrapFileKey on the download side.
+	WrappedFileKeyB64 string
+
+	// AES-GCM nonce used for the file content encryption. Distinct
+	// from KeyWrapNonceB64 — different (key, nonce) pairs, both
+	// required so the AEAD nonce is never reused under the same key.
+	NonceB64 string
+
+	// AES-GCM nonce used for the wrappedFileKey AEAD.
+	KeyWrapNonceB64 string
+
+	// Encrypted filename + its nonce. Server stores these instead of
+	// originalFilename so a DB dump doesn't reveal the catalog.
+	EncryptedFilenameB64 string
+	FilenameNonceB64     string
+}
+
+// EncryptFileForUpload runs the v1.2 upload pipeline end-to-end:
+//
+//  1. Generate a fresh 32-byte file key + 12-byte nonce.
+//  2. AES-256-GCM encrypt the file content with v1.2 AAD
+//     ("sefaly-file-aad|v=1.2|alg=AES-256-GCM|kem=ML-KEM-768").
+//  3. AES-256-GCM encrypt the filename under the SAME file key
+//     with a fresh nonce (filenames have no AAD by spec).
+//  4. ML-KEM-768 encapsulate against the user's own public key.
+//  5. HKDF the shared secret into a wrapping key
+//     (salt=encapsulatedKey, info="sefaly-file-key-wrap-v1").
+//  6. AES-256-GCM wrap the file key under the wrapping key.
+//
+// Returns all the bytes the upload protocol needs. The plaintext
+// file key never escapes this function — it's zeroed before return.
+func EncryptFileForUpload(
+	plaintext []byte,
+	filename string,
+	publicKeyB64 string,
+) (*UploadCrypto, error) {
+	publicKey, err := base64.StdEncoding.DecodeString(publicKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding public key: %w", err)
+	}
+	if len(publicKey) != mlkem768.PublicKeySize {
+		return nil, fmt.Errorf(
+			"public key must be %d bytes, got %d",
+			mlkem768.PublicKeySize, len(publicKey),
+		)
+	}
+	var pk mlkem768.PublicKey
+	if err := pk.Unpack(publicKey); err != nil {
+		return nil, fmt.Errorf("parsing public key: %w", err)
+	}
+
+	// 1. File key (32 bytes) + content nonce (12 bytes).
+	fileKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
+		return nil, fmt.Errorf("reading randomness for file key: %w", err)
+	}
+	defer func() {
+		for i := range fileKey {
+			fileKey[i] = 0
+		}
+	}()
+	nonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("reading randomness for nonce: %w", err)
+	}
+
+	// 2. Encrypt file content with v1.2 AAD.
+	aad := buildFileAAD("1.2", "AES-256-GCM", "ML-KEM-768")
+	ciphertext, err := aesGCMSeal(fileKey, nonce, plaintext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting file content: %w", err)
+	}
+
+	// 3. Encrypt filename with the SAME key + a fresh nonce. No AAD —
+	// browser doesn't bind one either (intentional: the wire format
+	// for names is plain AEAD).
+	filenameNonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, filenameNonce); err != nil {
+		return nil, fmt.Errorf("reading randomness for filename nonce: %w", err)
+	}
+	encryptedFilename, err := aesGCMSeal(fileKey, filenameNonce, []byte(filename), nil)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting filename: %w", err)
+	}
+
+	// 4. ML-KEM-768 encapsulate against the user's public key.
+	kemSeed := make([]byte, mlkem768.EncapsulationSeedSize)
+	if _, err := io.ReadFull(rand.Reader, kemSeed); err != nil {
+		return nil, fmt.Errorf("reading randomness for KEM seed: %w", err)
+	}
+	kemCt := make([]byte, mlkem768.CiphertextSize)
+	sharedSecret := make([]byte, mlkem768.SharedKeySize)
+	pk.EncapsulateTo(kemCt, sharedSecret, kemSeed)
+	defer func() {
+		for i := range sharedSecret {
+			sharedSecret[i] = 0
+		}
+	}()
+
+	// 5. Derive AES wrap key via HKDF. Salt is the encapsulatedKey
+	// itself, info matches the browser exactly.
+	wrappingKey, err := hkdf.Key(sha256.New, sharedSecret, kemCt, hkdfInfoFileKeyWrap, 32)
+	if err != nil {
+		return nil, fmt.Errorf("HKDF: %w", err)
+	}
+	defer func() {
+		for i := range wrappingKey {
+			wrappingKey[i] = 0
+		}
+	}()
+
+	// 6. Wrap the file key under wrappingKey. Fresh nonce.
+	keyWrapNonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, keyWrapNonce); err != nil {
+		return nil, fmt.Errorf("reading randomness for key-wrap nonce: %w", err)
+	}
+	wrappedFileKey, err := aesGCMSeal(wrappingKey, keyWrapNonce, fileKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping file key: %w", err)
+	}
+
+	return &UploadCrypto{
+		Ciphertext:           ciphertext,
+		EncapsulatedKeyB64:   base64.StdEncoding.EncodeToString(kemCt),
+		WrappedFileKeyB64:    base64.StdEncoding.EncodeToString(wrappedFileKey),
+		NonceB64:             base64.StdEncoding.EncodeToString(nonce),
+		KeyWrapNonceB64:      base64.StdEncoding.EncodeToString(keyWrapNonce),
+		EncryptedFilenameB64: base64.StdEncoding.EncodeToString(encryptedFilename),
+		FilenameNonceB64:     base64.StdEncoding.EncodeToString(filenameNonce),
+	}, nil
 }
 
 // DecryptName decrypts an AES-GCM-encrypted filename or folder name

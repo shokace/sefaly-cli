@@ -194,3 +194,23 @@ func aesGCMOpen(key, nonce, ciphertext, aad []byte) ([]byte, error) {
 	}
 	return gcm.Open(nil, nonce, ciphertext, aad)
 }
+
+// aesGCMSeal mirrors aesGCMOpen for the upload path. Returns
+// ciphertext || tag (16-byte tag, GCM's default). Matches Web Crypto's
+// AES-GCM.encrypt output exactly: the browser also appends the tag,
+// so a CLI-encrypted blob roundtrips through the existing decrypt
+// path without any reordering.
+func aesGCMSeal(key, nonce, plaintext, aad []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, errors.New("AES key must be 32 bytes (AES-256)")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("GCM: %w", err)
+	}
+	return gcm.Seal(nil, nonce, plaintext, aad), nil
+}
