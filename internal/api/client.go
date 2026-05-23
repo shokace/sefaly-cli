@@ -267,3 +267,83 @@ func (c *Client) Tree(ctx context.Context) (*TreeResponse, error) {
 	}
 	return out, nil
 }
+
+// ---- Download ----
+
+// OwnerWrap is the wrap material the server returns to the FILE
+// OWNER (not to a share recipient). Carries everything the CLI needs
+// to unwrap the file key + decrypt the content in one round-trip.
+type OwnerWrap struct {
+	EncapsulatedKey   string `json:"encapsulatedKey"`
+	WrappedFileKey    string `json:"wrappedFileKey"`
+	Nonce             string `json:"nonce"`        // file CONTENT nonce
+	KeyWrapNonce      string `json:"keyWrapNonce"` // key WRAP nonce
+	EncryptionVersion string `json:"encryptionVersion"`
+}
+
+// FileURLResponse is what /api/files/[id]/url returns. `DownloadURL`
+// may be a presigned R2 URL (prod) OR a same-origin streaming
+// endpoint (filesystem-backed dev). Either way the CLI's
+// FetchCiphertext can read it with no special handling.
+type FileURLResponse struct {
+	DownloadURL      string     `json:"downloadUrl"`
+	OriginalFilename *string    `json:"originalFilename"`
+	MimeType         *string    `json:"mimeType"`
+	OwnerWrap        *OwnerWrap `json:"ownerWrap,omitempty"`
+}
+
+// FileURL asks the server for a download URL + the wrap material
+// needed to decrypt. Authenticated.
+func (c *Client) FileURL(ctx context.Context, fileID string) (*FileURLResponse, error) {
+	out := &FileURLResponse{}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/files/"+fileID+"/url", nil, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FetchCiphertext downloads bytes from a URL that's NOT necessarily
+// on our base host — typically the presigned R2 URL returned by
+// /api/files/[id]/url. No Bearer header (R2 wouldn't accept it
+// anyway; the auth is baked into the URL's query string by the
+// presign). User-Agent is still stamped so server-side R2 logs
+// can identify CLI clients.
+//
+// Reads into memory. For very large files we'll want a streaming
+// AES-GCM open + on-the-fly disk write, but that needs streaming
+// support from the underlying cipher; the AEAD interface used here
+// doesn't support it. Acceptable for the MVP — typical Sefaly files
+// fit comfortably.
+func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error) {
+	// A separate, longer-timeout client. The default 30s on the
+	// JSON client is too tight for multi-MB downloads; bump to
+	// 10 min which covers anything reasonable while still bounding
+	// hangs. Per-request override is fine — we don't share state
+	// with the JSON path.
+	dl := &http.Client{Timeout: 10 * time.Minute}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building download request: %w", err)
+	}
+	req.Header.Set("User-Agent", UserAgent)
+
+	resp, err := dl.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, &APIError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("GET %s: storage backend returned %d", url, resp.StatusCode),
+		}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading ciphertext: %w", err)
+	}
+	return body, nil
+}

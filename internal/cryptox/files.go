@@ -129,6 +129,62 @@ func UnwrapFileKey(
 	return fileKey, nil
 }
 
+// DecryptFileContent recovers a file's plaintext from its ciphertext +
+// the unwrapped fileKey. Mirrors the browser's
+// decryptFileAfterDownload (browser-crypto.ts):
+//
+//   - v1.0 / v1.1: no AAD on the AES-GCM open.
+//   - v1.2: AAD = "sefaly-file-aad|v=<ver>|alg=AES-256-GCM|kem=ML-KEM-768"
+//     so a server that swaps any of those three fields between
+//     encrypt and decrypt fails GCM auth instead of silently
+//     decrypting under the wrong parameters.
+//
+// Unknown / missing versions are rejected outright — same defensive
+// posture as the browser (it explicitly fails on missing version to
+// stop a malicious server forcing a downgrade to a weaker code path).
+func DecryptFileContent(
+	fileKey []byte,
+	nonceB64 string,
+	version string,
+	ciphertext []byte,
+) ([]byte, error) {
+	if len(fileKey) != 32 {
+		return nil, errors.New("file key must be 32 bytes")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(nonceB64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding nonce: %w", err)
+	}
+	if len(nonce) != aesGCMNonceLen {
+		return nil, fmt.Errorf("file nonce must be %d bytes (got %d)", aesGCMNonceLen, len(nonce))
+	}
+
+	var aad []byte
+	switch version {
+	case "1.0", "1.1":
+		aad = nil // no AAD before v1.2
+	case "1.2":
+		aad = buildFileAAD(version, "AES-256-GCM", "ML-KEM-768")
+	case "":
+		return nil, errors.New("missing encryption version on file row — refusing to decrypt without it")
+	default:
+		return nil, fmt.Errorf("unsupported encryption version: %q", version)
+	}
+
+	plaintext, err := aesGCMOpen(fileKey, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("AES-GCM open failed (version=%s) — usually a wrong key or tampered ciphertext: %w", version, err)
+	}
+	return plaintext, nil
+}
+
+// buildFileAAD must produce the EXACT byte sequence the browser
+// produces in src/lib/crypto/browser-crypto.ts. Any drift here
+// silently breaks decryption for every v1.2 file the user owns.
+func buildFileAAD(version, algorithm, kemType string) []byte {
+	return []byte(fmt.Sprintf("sefaly-file-aad|v=%s|alg=%s|kem=%s", version, algorithm, kemType))
+}
+
 // DecryptName decrypts an AES-GCM-encrypted filename or folder name
 // with the file/folder key. No AAD — the wire format encrypts names
 // without one (different from the device-flow privateKey blob, which
