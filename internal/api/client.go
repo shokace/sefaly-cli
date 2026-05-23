@@ -441,6 +441,90 @@ func (c *Client) UploadComplete(ctx context.Context, req *UploadCompleteRequest)
 	return out, nil
 }
 
+// ---- File / folder mutation ----
+
+// DeleteFile soft-removes a single file. The server handles the R2
+// object cleanup + share-recipient event fan-out. Idempotent on the
+// server side; returns 404 if the id doesn't exist or isn't ours.
+func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/api/files/"+fileID, nil, nil)
+}
+
+// DeleteFolder removes a folder. Server-side this is recursive and
+// transactional — all descendant files + subfolders + share rows go
+// with it. We don't pass any options; the server's behaviour matches
+// the dashboard's "delete folder" semantics.
+func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/api/folders/"+folderID, nil, nil)
+}
+
+// CreateFolderRequest matches POST /api/folders body for the
+// encrypted-name path. Mirrors the dashboard's create call:
+//
+//   - `EncryptedName`     = AES-GCM(folderNameKey, nameBytes, nonce=nameNonce)
+//   - `NameNonce`         = 12-byte AES-GCM nonce, base64
+//   - `NameKeyEncapsulated` / `NameKeyWrapped` / `NameKeyWrapNonce`
+//     = ML-KEM-768 wrap of the per-folder name key, against the
+//     authenticated user's own public key (no cross-owner WRITE
+//     path from the CLI in v1).
+//   - `ParentID` optional; null/empty → root.
+type CreateFolderRequest struct {
+	ParentID            *string `json:"parentId"`
+	EncryptedName       string  `json:"encryptedName"`
+	NameNonce           string  `json:"nameNonce"`
+	NameKeyEncapsulated string  `json:"nameKeyEncapsulated"`
+	NameKeyWrapped      string  `json:"nameKeyWrapped"`
+	NameKeyWrapNonce    string  `json:"nameKeyWrapNonce"`
+}
+
+type CreateFolderResponse struct {
+	Folder struct {
+		ID                  string  `json:"id"`
+		ParentID            *string `json:"parentId"`
+		Name                *string `json:"name"`
+		EncryptedName       *string `json:"encryptedName"`
+		NameNonce           *string `json:"nameNonce"`
+		NameKeyEncapsulated *string `json:"nameKeyEncapsulated"`
+		NameKeyWrapped      *string `json:"nameKeyWrapped"`
+		NameKeyWrapNonce    *string `json:"nameKeyWrapNonce"`
+		CreatedAt           string  `json:"createdAt"`
+		UpdatedAt           string  `json:"updatedAt"`
+	} `json:"folder"`
+}
+
+func (c *Client) CreateFolder(ctx context.Context, req *CreateFolderRequest) (*CreateFolderResponse, error) {
+	out := &CreateFolderResponse{}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/folders", req, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PatchFile and PatchFolder take a free-form body so callers can
+// express the three states the server treats distinctly:
+//
+//   - key absent           → leave field alone
+//   - key present, null    → move-to-root (folderId=null /
+//                            parentId=null) on files / folders
+//   - key present, string  → set to value
+//
+// Go's `omitempty` + `*string` collapses the first two states (a
+// nil pointer omits the key, so "explicit null" is unreachable),
+// so we drop the struct shape here and let the command layer hand
+// us a map. Keys the server understands:
+//
+//   files:    folderId, originalFilename, encryptedFilename, filenameNonce
+//   folders:  parentId, name, encryptedName, nameNonce
+//
+// Anything else is ignored by the server.
+func (c *Client) PatchFile(ctx context.Context, fileID string, body map[string]interface{}) error {
+	return c.doJSON(ctx, http.MethodPatch, "/api/files/"+fileID, body, nil)
+}
+
+func (c *Client) PatchFolder(ctx context.Context, folderID string, body map[string]interface{}) error {
+	return c.doJSON(ctx, http.MethodPatch, "/api/folders/"+folderID, body, nil)
+}
+
 // FetchCiphertext downloads bytes from a URL that's NOT necessarily
 // on our base host — typically the presigned R2 URL returned by
 // /api/files/[id]/url. No Bearer header (R2 wouldn't accept it

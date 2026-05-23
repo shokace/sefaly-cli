@@ -243,6 +243,170 @@ type UploadCrypto struct {
 	FilenameNonceB64     string
 }
 
+// FolderNameCrypto is the wire bundle for POST /api/folders (the
+// encrypted-name path). Every field is base64-encoded on the wire;
+// callers that want the raw bytes can decode themselves.
+//
+// Each field maps 1:1 to the server's CreateFolderBody:
+//
+//   - EncryptedNameB64   → encryptedName
+//   - NameNonceB64       → nameNonce
+//   - NameKeyEncapsulated  → nameKeyEncapsulated
+//   - NameKeyWrapped       → nameKeyWrapped
+//   - NameKeyWrapNonce     → nameKeyWrapNonce
+type FolderNameCrypto struct {
+	EncryptedNameB64     string
+	NameNonceB64         string
+	NameKeyEncapsulated  string
+	NameKeyWrapped       string
+	NameKeyWrapNonce     string
+}
+
+// EncryptFolderName generates a fresh per-folder symmetric key,
+// encrypts the folder name under it, and ML-KEM-768-wraps the key
+// against the user's own public key. Mirrors the dashboard's
+// createFolderRecord encrypted-name path exactly so a folder
+// created from the CLI looks identical to one created from the
+// browser.
+//
+// No cross-owner WRITE path here — CLI v1 creates folders the user
+// owns, full stop. (The browser fans out per-recipient name-key
+// wraps when creating inside someone else's WRITE-shared subtree;
+// the CLI doesn't navigate into shared subtrees yet.)
+func EncryptFolderName(name, publicKeyB64 string) (*FolderNameCrypto, error) {
+	publicKey, err := base64.StdEncoding.DecodeString(publicKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding public key: %w", err)
+	}
+	if len(publicKey) != mlkem768.PublicKeySize {
+		return nil, fmt.Errorf(
+			"public key must be %d bytes, got %d",
+			mlkem768.PublicKeySize, len(publicKey),
+		)
+	}
+	var pk mlkem768.PublicKey
+	if err := pk.Unpack(publicKey); err != nil {
+		return nil, fmt.Errorf("parsing public key: %w", err)
+	}
+
+	// Per-folder name key + AES-GCM encrypt the name with it. No
+	// AAD — folder names follow the same plain-AEAD wire format as
+	// filenames.
+	folderNameKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, folderNameKey); err != nil {
+		return nil, fmt.Errorf("reading randomness for folder name key: %w", err)
+	}
+	defer func() {
+		for i := range folderNameKey {
+			folderNameKey[i] = 0
+		}
+	}()
+	encrypted, nonce, err := encryptNameBytes([]byte(name), folderNameKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// ML-KEM-768 encapsulate against the user's own public key,
+	// HKDF into wrap key, AES-wrap the folder-name key.
+	wrap, err := wrapKeyForRecipient(folderNameKey, &pk)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FolderNameCrypto{
+		EncryptedNameB64:    base64.StdEncoding.EncodeToString(encrypted),
+		NameNonceB64:        base64.StdEncoding.EncodeToString(nonce),
+		NameKeyEncapsulated: wrap.EncapsulatedKeyB64,
+		NameKeyWrapped:      wrap.WrappedKeyB64,
+		NameKeyWrapNonce:    wrap.KeyWrapNonceB64,
+	}, nil
+}
+
+// EncryptNameWithKey re-encrypts a name (file or folder) under an
+// existing 32-byte key with a fresh 12-byte nonce. Used by the
+// rename path on both `sef mv` (file rename) and folder rename —
+// no key rotation needed for a rename, just a fresh ciphertext +
+// nonce. Returns (encryptedB64, nonceB64).
+func EncryptNameWithKey(name string, key []byte) (string, string, error) {
+	if len(key) != 32 {
+		return "", "", errors.New("name key must be 32 bytes")
+	}
+	encrypted, nonce, err := encryptNameBytes([]byte(name), key)
+	if err != nil {
+		return "", "", err
+	}
+	return base64.StdEncoding.EncodeToString(encrypted),
+		base64.StdEncoding.EncodeToString(nonce),
+		nil
+}
+
+// encryptNameBytes is the shared inner loop for filename / folder-
+// name AES-GCM encryption. No AAD by spec.
+func encryptNameBytes(plaintext, key []byte) ([]byte, []byte, error) {
+	nonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, fmt.Errorf("reading randomness for name nonce: %w", err)
+	}
+	encrypted, err := aesGCMSeal(key, nonce, plaintext, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encrypting name: %w", err)
+	}
+	return encrypted, nonce, nil
+}
+
+// keyWrapBundle is what wrapKeyForRecipient returns — the three
+// base64 fields the server expects whether it's a file key or a
+// folder-name key being wrapped.
+type keyWrapBundle struct {
+	EncapsulatedKeyB64 string
+	WrappedKeyB64      string
+	KeyWrapNonceB64    string
+}
+
+// wrapKeyForRecipient does ML-KEM-768 encap + HKDF + AES-wrap of
+// `keyToWrap` against an already-parsed ML-KEM public key. Same
+// crypto path as EncryptFileForUpload's steps 4-6, factored out so
+// the folder-name flow can reuse it.
+func wrapKeyForRecipient(keyToWrap []byte, pk *mlkem768.PublicKey) (*keyWrapBundle, error) {
+	kemSeed := make([]byte, mlkem768.EncapsulationSeedSize)
+	if _, err := io.ReadFull(rand.Reader, kemSeed); err != nil {
+		return nil, fmt.Errorf("reading randomness for KEM seed: %w", err)
+	}
+	kemCt := make([]byte, mlkem768.CiphertextSize)
+	sharedSecret := make([]byte, mlkem768.SharedKeySize)
+	pk.EncapsulateTo(kemCt, sharedSecret, kemSeed)
+	defer func() {
+		for i := range sharedSecret {
+			sharedSecret[i] = 0
+		}
+	}()
+
+	wrappingKey, err := hkdf.Key(sha256.New, sharedSecret, kemCt, hkdfInfoFileKeyWrap, 32)
+	if err != nil {
+		return nil, fmt.Errorf("HKDF: %w", err)
+	}
+	defer func() {
+		for i := range wrappingKey {
+			wrappingKey[i] = 0
+		}
+	}()
+
+	keyWrapNonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, keyWrapNonce); err != nil {
+		return nil, fmt.Errorf("reading randomness for key-wrap nonce: %w", err)
+	}
+	wrappedKey, err := aesGCMSeal(wrappingKey, keyWrapNonce, keyToWrap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping key: %w", err)
+	}
+
+	return &keyWrapBundle{
+		EncapsulatedKeyB64: base64.StdEncoding.EncodeToString(kemCt),
+		WrappedKeyB64:      base64.StdEncoding.EncodeToString(wrappedKey),
+		KeyWrapNonceB64:    base64.StdEncoding.EncodeToString(keyWrapNonce),
+	}, nil
+}
+
 // EncryptFileForUpload runs the v1.2 upload pipeline end-to-end:
 //
 //  1. Generate a fresh 32-byte file key + 12-byte nonce.
