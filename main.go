@@ -1,5 +1,5 @@
-// Command sefaly is the CLI client for Sefaly's end-to-end-encrypted
-// cloud storage. See README.md / `sefaly --help` for usage.
+// Command sef is the CLI client for Sefaly's end-to-end-encrypted
+// cloud storage. See README.md / `sef --help` for usage.
 package main
 
 import (

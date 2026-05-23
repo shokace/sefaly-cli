@@ -16,18 +16,12 @@ import (
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
-	loginCmd.Flags().StringVar(&loginDeviceName, "name", "",
-		"Label for this device in the Connected Devices panel. "+
-			"Prompted interactively if not provided.")
 	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false,
 		"Don't try to open the verification URL in a browser. "+
 			"Useful on headless machines.")
 }
 
-var (
-	loginDeviceName string
-	loginNoBrowser  bool
-)
+var loginNoBrowser bool
 
 var loginCmd = &cobra.Command{
 	Use:   "login",

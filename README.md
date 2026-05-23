@@ -11,8 +11,10 @@ the tradition of `gh`, `fly`, `aws`. The project is still called
 Sefaly everywhere else (repo, brand, docs); only the typed command
 is shortened.
 
-> **Status:** early v0.x. `login`, `logout`, `whoami`, and `ls` work
-> today. `download` and `upload` are next.
+> **Status:** early v0.x. The full file-ops set works today:
+> `login` / `logout` / `whoami` / `ls` / `download` / `upload` /
+> `rm` / `mkdir` / `mv`. Distribution via Homebrew / Scoop / AUR
+> is next.
 
 ## Install
 
@@ -29,7 +31,7 @@ mv sef /usr/local/bin/
 sef --help
 ```
 
-Requires Go 1.24+ (we use the standard library's `crypto/mlkem` and
+Requires Go 1.26+ (we use the standard library's `crypto/mlkem` and
 `crypto/hkdf`).
 
 ## Quick start
@@ -55,7 +57,7 @@ Sefaly is zero-knowledge: your password and your private key never
 reach the server. The CLI inherits that property via a device-flow
 ceremony:
 
-1. `sefaly login` generates an ephemeral ML-KEM-768 keypair and sends
+1. `sef login` generates an ephemeral ML-KEM-768 keypair and sends
    only the public half to the server, alongside a request for a
    pending device code.
 2. The browser, after you click Allow, generates a random access
@@ -69,9 +71,6 @@ ceremony:
 
 After that, every CLI command authenticates with
 `Authorization: Bearer <token>` — same endpoints the web app uses.
-
-The full crypto spec lives in [`docs/CRYPTO_SPEC.md`](docs/CRYPTO_SPEC.md)
-once it's written (coming soon).
 
 ## Credential storage
 
@@ -93,9 +92,9 @@ devices" panel in your dashboard, even if you've lost the machine.
 By default the CLI talks to `https://www.sefaly.com`. Override with:
 
 ```sh
-sefaly --api https://staging.sefaly.com login
+sef --api https://staging.sefaly.com login
 # or
-SEFALY_API_URL=https://staging.sefaly.com sefaly login
+SEFALY_API_URL=https://staging.sefaly.com sef login
 ```
 
 ## Security

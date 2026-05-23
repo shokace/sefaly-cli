@@ -32,7 +32,9 @@ In scope:
 - The CLI binary itself (this repo)
 - Its interaction with the Sefaly API (auth, file operations,
   credential storage)
-- The wire formats documented in `docs/CRYPTO_SPEC.md`
+- The wire formats implemented in `internal/cryptox/` (a dedicated
+  `docs/CRYPTO_SPEC.md` is planned; the source is authoritative
+  until it lands)
 - The OS-keychain integrations (macOS Keychain, Linux Secret Service,
   Windows Credential Manager)
 

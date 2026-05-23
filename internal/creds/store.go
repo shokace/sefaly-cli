@@ -115,7 +115,7 @@ func Save(c *Credentials) (usedFallback bool, err error) {
 			Key:         keychainKey,
 			Data:        blob,
 			Label:       keychainLabel,
-			Description: "Stored by the sefaly CLI; remove via `sefaly logout`.",
+			Description: "Stored by the sefaly CLI; remove via `sef logout`.",
 		})
 		if setErr == nil {
 			// Belt-and-suspenders: if a stale fallback file exists

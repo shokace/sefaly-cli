@@ -93,14 +93,12 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	// CSRF gate on mutating routes (assertCsrfSafe in web app) checks
-	// that Origin matches the request URL's origin. Browsers set this
-	// automatically; CLI clients have to add it explicitly. Setting
-	// it to our own base URL passes the same-origin check — which is
-	// the only thing the server is gating on for non-cookie callers
-	// anyway. (CSRF is fundamentally a browser-cookie attack; Bearer
-	// auth isn't vulnerable to it because the attacker would need to
-	// know the token, not just an open browser session.)
+	// Stamp an Origin header matching our base URL. Current servers
+	// (post-2026-05) short-circuit assertCsrfSafe for Bearer-
+	// authenticated requests, so this is a no-op on them. We keep
+	// stamping it for compatibility with older Sefaly servers where
+	// the CSRF gate predates that change — without it, the request
+	// would 403 on those.
 	req.Header.Set("Origin", c.BaseURL)
 
 	resp, err := c.httpc.Do(req)
