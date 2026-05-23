@@ -116,7 +116,7 @@ Devices panel on the web app.`,
 			case "denied":
 				return errors.New("request denied in the browser")
 			case "expired":
-				return errors.New("the code expired before approval — run `sefaly login` again")
+				return errors.New("the code expired before approval — run `sef login` again")
 			default:
 				return fmt.Errorf("unexpected poll status: %q", poll.Status)
 			}

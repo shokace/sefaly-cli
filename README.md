@@ -1,4 +1,4 @@
-# sefaly
+# sef — Sefaly CLI
 
 Command-line client for [Sefaly](https://www.sefaly.com), an
 end-to-end-encrypted cloud storage service that uses post-quantum
@@ -6,18 +6,27 @@ cryptography (ML-KEM-768) for key wrapping. Files are encrypted in
 your shell before they leave the machine; the server never has the
 keys to decrypt them.
 
-> **Status:** early v0.x. `login`, `logout`, and `whoami` work today.
-> `upload`, `ls`, `download` are next.
+The invocable command is **`sef`** — short single-syllable name in
+the tradition of `gh`, `fly`, `aws`. The project is still called
+Sefaly everywhere else (repo, brand, docs); only the typed command
+is shortened.
+
+> **Status:** early v0.x. `login`, `logout`, `whoami`, and `ls` work
+> today. `download` and `upload` are next.
 
 ## Install
 
-> Packaged installers are coming. For now: build from source.
+> Packaged installers (Homebrew tap, AUR, Scoop) coming via
+> GoReleaser. For now: build from source.
 
 ```sh
 git clone https://github.com/shokace/sefaly-cli
 cd sefaly-cli
-go build -o sefaly .
-./sefaly --help
+go build -o sef .
+
+# Put it on your PATH (one option):
+mv sef /usr/local/bin/
+sef --help
 ```
 
 Requires Go 1.24+ (we use the standard library's `crypto/mlkem` and
@@ -26,14 +35,17 @@ Requires Go 1.24+ (we use the standard library's `crypto/mlkem` and
 ## Quick start
 
 ```sh
-sefaly login
+sef login
 # → opens https://www.sefaly.com/cli-auth?user_code=… in your browser
 # → approve the request → CLI is now signed in
 
-sefaly whoami
+sef whoami
 # → you@example.com (signed in as <device-name>)
 
-sefaly logout
+sef ls
+# → list files + folders in your account root
+
+sef logout
 # → clears local credentials
 ```
 

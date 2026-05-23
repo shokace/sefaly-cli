@@ -17,6 +17,6 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Build
-        run: go build -trimpath -o sefaly .
+        run: go build -trimpath -o sef .
       - name: Test
         run: go test -race -count=1 ./...

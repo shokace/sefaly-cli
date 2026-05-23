@@ -18,6 +18,15 @@ import (
 // ldflags.
 var Version = "dev"
 
+// binaryName is what the CLI calls itself in usage strings, error
+// messages, and `--help`. Match it to the actual filename the build
+// produces (see CI + README): the install is `sef`, not `sefaly`.
+// Short single-syllable command names are the norm for CLIs people
+// type a lot (`gh`, `fly`, `aws`, `kubectl`). The project is still
+// "Sefaly" everywhere else — repo name, copyright, brand — only the
+// invocable binary is shortened.
+const binaryName = "sef"
+
 // apiBaseURL is the `--api` flag's value, resolved per invocation.
 // Empty means "use the stored creds' URL, or the default if not
 // signed in". Read by each command via resolveBaseURL() so the
@@ -25,16 +34,17 @@ var Version = "dev"
 var apiBaseURL string
 
 var rootCmd = &cobra.Command{
-	Use:   "sefaly",
+	Use:   binaryName,
 	Short: "End-to-end encrypted cloud storage from your terminal.",
 	Long: `Sefaly's command-line client.
 
 Files are encrypted in this shell before they leave the machine.
 The server never has the keys to decrypt them.
 
-Start with:    sefaly login
-Check status:  sefaly whoami
-Sign out:      sefaly logout
+Start with:    sef login
+Check status:  sef whoami
+List files:    sef ls
+Sign out:      sef logout
 
 More at https://www.sefaly.com.`,
 	SilenceUsage:  true, // don't dump --help on every error; the error message is enough
@@ -50,7 +60,7 @@ func init() {
 
 	// User-Agent header includes the version so server-side logs and
 	// rate limits can distinguish CLI traffic by client version.
-	api.UserAgent = "sefaly-cli/" + Version
+	api.UserAgent = binaryName + "/" + Version
 }
 
 // Execute is the entrypoint. Returns the process exit code; callers

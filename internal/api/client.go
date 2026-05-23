@@ -196,3 +196,74 @@ func (c *Client) Me(ctx context.Context) (*Me, error) {
 	}
 	return &resp.User, nil
 }
+
+// ---- File tree ----
+
+// Folder is one row from /api/files?tree=1's `folders` array. Names
+// are encrypted; the CLI decrypts them locally using the wrap material
+// also returned on the row.
+//
+// Pre-rollout folders carry plaintext `Name` and null wrap material;
+// post-rollout folders carry null `Name` and full wrap material. The
+// CLI picks whichever is present.
+type Folder struct {
+	ID                  string  `json:"id"`
+	ParentID            *string `json:"parentId"`
+	Name                *string `json:"name"`
+	EncryptedName       *string `json:"encryptedName"`
+	NameNonce           *string `json:"nameNonce"`
+	NameKeyEncapsulated *string `json:"nameKeyEncapsulated"`
+	NameKeyWrapped      *string `json:"nameKeyWrapped"`
+	NameKeyWrapNonce    *string `json:"nameKeyWrapNonce"`
+	CreatedAt           string  `json:"createdAt"`
+	UpdatedAt           string  `json:"updatedAt"`
+}
+
+// File is one row from `files`. Same plaintext-vs-encrypted name
+// duality as Folder, with one extra wrinkle: the wrap nonce lives
+// inside `encryptionMetadata.keyWrapNonce` rather than as a
+// top-level column.
+type File struct {
+	ID                 string                 `json:"id"`
+	FolderID           *string                `json:"folderId"`
+	OriginalFilename   *string                `json:"originalFilename"`
+	EncryptedFilename  *string                `json:"encryptedFilename"`
+	FilenameNonce      *string                `json:"filenameNonce"`
+	MimeType           *string                `json:"mimeType"`
+	SizeBytes          string                 `json:"sizeBytes"` // serialized as string because BigInt
+	StoragePath        string                 `json:"storagePath"`
+	EncryptedFileKey   string                 `json:"encryptedFileKey"`
+	EncapsulatedKey    string                 `json:"encapsulatedKey"`
+	Nonce              string                 `json:"nonce"`
+	EncryptionMetadata map[string]interface{} `json:"encryptionMetadata"`
+	CreatedAt          string                 `json:"createdAt"`
+	UpdatedAt          string                 `json:"updatedAt"`
+}
+
+// KeyWrapNonce extracts the AES-GCM nonce used to wrap the file key,
+// pulled from the JSON `encryptionMetadata.keyWrapNonce`. Falls back
+// to the file's content `Nonce` on v1.0 legacy rows (where the same
+// nonce was reused — the v1.1+ rollout added a dedicated wrap nonce
+// to fix that).
+func (f *File) KeyWrapNonce() string {
+	if v, ok := f.EncryptionMetadata["keyWrapNonce"].(string); ok && v != "" {
+		return v
+	}
+	return f.Nonce
+}
+
+// TreeResponse is /api/files?tree=1's payload. Only `folders` and
+// `files` are populated today; the `syncedShares` field exists in
+// the schema but the CLI doesn't render shared content yet.
+type TreeResponse struct {
+	Folders []Folder `json:"folders"`
+	Files   []File   `json:"files"`
+}
+
+func (c *Client) Tree(ctx context.Context) (*TreeResponse, error) {
+	out := &TreeResponse{}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/files?tree=1", nil, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

@@ -28,7 +28,7 @@ whoami will report it instead of silently lying.`,
 		stored, err := creds.Load()
 		if err != nil {
 			if errors.Is(err, creds.ErrNotFound) {
-				return errors.New("not signed in — run `sefaly login`")
+				return errors.New("not signed in — run `sef login`")
 			}
 			return fmt.Errorf("reading credentials: %w", err)
 		}
@@ -52,7 +52,7 @@ whoami will report it instead of silently lying.`,
 		me, err := client.Me(ctx)
 		if err != nil {
 			if api.IsStatus(err, 401) {
-				return errors.New("server rejected your token — it may have been revoked. Run `sefaly login` to re-authorize.")
+				return errors.New("server rejected your token — it may have been revoked. Run `sef login` to re-authorize.")
 			}
 			// Soft warning rather than a hard error — useful info
 			// still printed above, network might just be flaky.
