@@ -295,22 +295,25 @@ func mutedLine(text string, height, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderStatus draws the bottom status bar — context-appropriate
-// keybinds + any pending error message.
+// renderStatus draws the bottom status bar — priority order:
+//
+//   1. In-flight transfer (blue, "⟳ Uploading foo.txt → /Photos")
+//   2. Most recent error (red banner)
+//   3. Context keybinds
+//
+// Errors get displaced by a fresh transfer because a new "Copy
+// started" signal is more useful than a stale failure message.
 func (m *Model) renderStatus(width int) string {
-	keys := "[Tab] switch  [↑↓/WS] move  [Enter/→/D] open  [Backspace/←/A] up  [q] quit"
-	if m.collapsed {
-		keys = "[Tab] swap pane  " + keys
+	if m.transfer != nil {
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("#3d59a1")).
+			Foreground(lipgloss.Color("#ffffff")).
+			Width(width).
+			Padding(0, 1).
+			Render("⟳ " + m.transfer.label)
 	}
 
-	style := lipgloss.NewStyle().
-		Background(lipgloss.Color("#1a1b26")).
-		Foreground(lipgloss.Color("#a9b1d6")).
-		Width(width).
-		Padding(0, 1)
-
 	if m.statusErr != nil {
-		// Errors trump keybinds — they're rare and important.
 		return lipgloss.NewStyle().
 			Background(lipgloss.Color("#7c3a3a")).
 			Foreground(lipgloss.Color("#ffffff")).
@@ -318,7 +321,18 @@ func (m *Model) renderStatus(width int) string {
 			Padding(0, 1).
 			Render("⚠ " + m.statusErr.Error())
 	}
-	return style.Render(keys)
+
+	keys := "[Tab] switch  [↑↓/WS] move  [Enter/→] open  [Backspace/←] up  [c] copy  [q] quit"
+	if m.collapsed {
+		keys = "[Tab] swap pane  " + keys
+	}
+
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("#1a1b26")).
+		Foreground(lipgloss.Color("#a9b1d6")).
+		Width(width).
+		Padding(0, 1).
+		Render(keys)
 }
 
 // --- small helpers ------------------------------------------------

@@ -76,6 +76,11 @@ type Model struct {
 	// While false, the remote pane shows a spinner / "Loading…"
 	// placeholder instead of the entry list.
 	ready bool
+
+	// Currently-running transfer (one at a time in Phase B v1).
+	// Non-nil while a copy is in flight; the status bar shows
+	// `transfer.label` and the `c` keybinding becomes a no-op.
+	transfer *transferState
 }
 
 // NewModel constructs a fresh model ready to be handed to
@@ -179,6 +184,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case localErrMsg:
 		m.statusErr = fmt.Errorf("reading local directory: %w", msg.err)
 		return m, nil
+
+	case transferCompletedMsg:
+		m.transfer = nil
+		m.statusErr = nil
+		// Refresh the DESTINATION pane (opposite of the source).
+		// Upload → refetch remote tree so the new file shows up.
+		// Download → re-read local cwd so the new file shows up.
+		if msg.source == PaneLocal {
+			return m, m.fetchTree()
+		}
+		return m, m.local.load()
+
+	case transferFailedMsg:
+		m.transfer = nil
+		m.statusErr = fmt.Errorf("transfer failed: %w", msg.err)
+		return m, nil
 	}
 	return m, nil
 }
@@ -197,6 +218,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focused = PaneLocal
 		}
 		return m, nil
+
+	case "c", "f5":
+		// Copy the focused pane's selection to the OTHER pane's
+		// current directory. Ignored if a transfer is already in
+		// flight (status bar already shows what's happening).
+		if m.transfer != nil {
+			return m, nil
+		}
+		return m, m.startCopy()
 	}
 
 	// Route remaining keys to the focused pane.
