@@ -137,7 +137,6 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 type DeviceCodeResponse struct {
 	DeviceCode              string `json:"deviceCode"`
 	UserCode                string `json:"userCode"`
-	VerificationURI         string `json:"verificationUri"`
 	VerificationURIComplete string `json:"verificationUriComplete"`
 	ExpiresIn               int    `json:"expiresIn"`
 	Interval                int    `json:"interval"`
