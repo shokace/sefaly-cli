@@ -1,0 +1,123 @@
+# GoReleaser config for `sef`.
+#
+# Tag a release locally + push the tag:
+#   git tag -a v0.1.0 -m "First release"
+#   git push origin v0.1.0
+#
+# The .github/workflows/release.yml workflow picks up the tag and
+# runs `goreleaser release --clean`, which builds the matrix, signs
+# checksums, and publishes a GitHub Release with the tarballs.
+#
+# Local dry-run (no upload, no tag required):
+#   goreleaser release --snapshot --clean --skip=publish
+#
+# Verify config:  goreleaser check
+
+version: 2
+
+project_name: sef
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sef
+    main: .
+    binary: sef
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # -s -w strips the symbol table + DWARF info, ~30% smaller binary.
+      # The -X injection replaces the `dev` default in
+      # internal/cli/root.go so `sef --version` reports the tag.
+      - -s -w
+      - -X github.com/shokace/sefaly-cli/internal/cli.Version=v{{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Linux/macOS get both arches. Windows/arm64 is rare in the wild
+    # but cheap to produce, so include it.
+
+archives:
+  - id: sef-archive
+    # Tarball naming. Install.sh parses the GitHub release API to find
+    # the right asset, so the exact filename isn't load-bearing, but
+    # keep it predictable: sef_<version>_<os>_<arch>.<ext>.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - SECURITY.md
+
+checksum:
+  name_template: sha256sums.txt
+  algorithm: sha256
+
+snapshot:
+  # Snapshot builds (no tag) get a version like "0.0.1-next-<sha>",
+  # useful for `goreleaser release --snapshot` smoke runs.
+  version_template: "{{ incpatch .Version }}-next-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  use: github
+  # GoReleaser autogenerates the release notes from commit subjects.
+  # Skip housekeeping commits — they're noise in user-facing notes.
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: New features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 999
+
+release:
+  github:
+    owner: shokace
+    name: sefaly-cli
+  draft: false
+  prerelease: auto
+  name_template: "{{.Tag}}"
+  # A footer that lands on every release page. Points people at the
+  # install script + the security policy.
+  footer: |
+    ## Install
+
+    ```sh
+    curl -fsSL https://www.sefaly.com/install.sh | sh
+    ```
+
+    Or download the binary for your platform from the assets above.
+    SHA-256 checksums for every artifact are in `sha256sums.txt`.
+
+    ## Security
+
+    Report vulnerabilities to `security@sefaly.com`. See `SECURITY.md`
+    in the repo for the disclosure policy.

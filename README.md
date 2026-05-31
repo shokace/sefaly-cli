@@ -18,21 +18,44 @@ is shortened.
 
 ## Install
 
-> Packaged installers (Homebrew tap, AUR, Scoop) coming via
-> GoReleaser. For now: build from source.
+### One-liner (Linux + macOS)
+
+```sh
+curl -fsSL https://www.sefaly.com/install.sh | sh
+```
+
+The script detects your OS + arch, grabs the matching release from
+GitHub, verifies its SHA-256, and drops the `sef` binary in
+`~/.local/bin/`. Add that directory to your `PATH` if it isn't
+already.
+
+### Manual download
+
+Grab the tarball for your platform from the
+[Releases page](https://github.com/shokace/sefaly-cli/releases/latest)
+and extract `sef` somewhere on your `PATH`. SHA-256 checksums for
+every artifact are in `sha256sums.txt` on the same release.
+
+### Build from source
 
 ```sh
 git clone https://github.com/shokace/sefaly-cli
 cd sefaly-cli
 go build -o sef .
-
-# Put it on your PATH (one option):
 mv sef /usr/local/bin/
 sef --help
 ```
 
 Requires Go 1.26+ (we use the standard library's `crypto/mlkem` and
 `crypto/hkdf`).
+
+### Windows
+
+Download `sef_<version>_windows_amd64.zip` from the Releases page,
+extract `sef.exe`, and add the containing folder to your `PATH`. The
+one-liner above doesn't support Windows yet (planned for a future
+release; native Scoop / winget installers are easier than a PowerShell
+script).
 
 ## Quick start
 
