@@ -65,7 +65,10 @@ ciphertext.`,
 		}
 		defer zero(privKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)

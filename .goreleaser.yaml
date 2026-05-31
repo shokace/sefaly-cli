@@ -6,7 +6,8 @@
 #
 # The .github/workflows/release.yml workflow picks up the tag and
 # runs `goreleaser release --clean`, which builds the matrix, signs
-# checksums, and publishes a GitHub Release with the tarballs.
+# the checksums file with cosign (keyless, via GitHub OIDC), and
+# publishes a GitHub Release with the tarballs + .sig + .pem.
 #
 # Local dry-run (no upload, no tag required):
 #   goreleaser release --snapshot --clean --skip=publish
@@ -70,6 +71,42 @@ checksum:
   name_template: sha256sums.txt
   algorithm: sha256
 
+# Keyless cosign signing. Signs sha256sums.txt only (which itself
+# transitively covers every artifact via its hashes), so the user
+# only has to verify one signature, not 8.
+#
+# - identity: pulled from the GitHub Actions OIDC token. The
+#   resulting certificate's SAN is
+#   `https://github.com/shokace/sefaly-cli/.github/workflows/release.yml@refs/tags/v0.1.0`,
+#   so verifiers can pin to "must have come from THIS workflow in
+#   THIS repo at THIS tag" via cosign's --certificate-identity-regexp
+#   and --certificate-oidc-issuer flags.
+# - storage: signature is logged to the Rekor transparency log by
+#   default — a public, append-only ledger so anyone can spot
+#   anomalous signing activity.
+# - keyless: no long-lived signing key to leak. The cert is issued
+#   for ~10 minutes per release run and never persisted.
+#
+# Verification (manual):
+#   cosign verify-blob \
+#     --certificate sha256sums.txt.pem \
+#     --signature   sha256sums.txt.sig \
+#     --certificate-identity-regexp '^https://github.com/shokace/sefaly-cli/' \
+#     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+#     sha256sums.txt
+signs:
+  - cmd: cosign
+    signature: '${artifact}.sig'
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-signature=${signature}'
+      - '--output-certificate=${certificate}'
+      - '${artifact}'
+      - '--yes'
+    artifacts: checksum
+    output: true
+
 snapshot:
   # Snapshot builds (no tag) get a version like "0.0.1-next-<sha>",
   # useful for `goreleaser release --snapshot` smoke runs.
@@ -114,8 +151,32 @@ release:
     curl -fsSL https://www.sefaly.com/install.sh | sh
     ```
 
+    `install.sh` verifies the cosign signature on `sha256sums.txt`
+    automatically when cosign is on your PATH, and always verifies the
+    SHA-256 of the downloaded archive before installing.
+
     Or download the binary for your platform from the assets above.
-    SHA-256 checksums for every artifact are in `sha256sums.txt`.
+
+    ## Verify the release manually
+
+    Every release is signed with cosign keyless (GitHub Actions OIDC,
+    no long-lived key). To verify `sha256sums.txt` came from this
+    repo's release workflow:
+
+    ```sh
+    cosign verify-blob \
+      --certificate sha256sums.txt.pem \
+      --signature   sha256sums.txt.sig \
+      --certificate-identity-regexp '^https://github.com/shokace/sefaly-cli/' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      sha256sums.txt
+    ```
+
+    Then verify the binary against the (now-trusted) checksums file:
+
+    ```sh
+    sha256sum -c sha256sums.txt --ignore-missing
+    ```
 
     ## Security
 

@@ -62,7 +62,10 @@ GNU mkdir's default).`,
 		}
 		publicKeyB64 := base64StdString(publicKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		// One tree fetch per invocation. With -p we mutate the local

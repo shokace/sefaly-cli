@@ -59,7 +59,10 @@ never sees the plaintext.`,
 		}
 		defer zero(privKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		ctxTree, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)

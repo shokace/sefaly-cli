@@ -44,7 +44,10 @@ whoami will report it instead of silently lying.`,
 		// Server check. Use the stored baseURL unless `--api`
 		// overrides — switching hosts via the flag without
 		// re-logging-in won't give a useful answer anyway.
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)

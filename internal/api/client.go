@@ -43,7 +43,21 @@ func New(baseURL, bearerToken string) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		Token:   bearerToken,
-		httpc:   &http.Client{Timeout: 30 * time.Second},
+		httpc: &http.Client{
+			Timeout: 30 * time.Second,
+			// Refuse to follow redirects. The JSON client carries the
+			// Bearer access token in `Authorization`, and a malicious
+			// or misconfigured API host could 302 that token to an
+			// attacker-controlled endpoint. The Sefaly API never
+			// intentionally returns 3xx for any documented JSON route,
+			// so the user-visible cost is zero. Returning an explicit
+			// error (not http.ErrUseLastResponse) makes c.httpc.Do
+			// surface a clear failure to the caller instead of
+			// silently producing an unparseable 3xx body.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return fmt.Errorf("refusing to follow redirect to %q (would carry the Bearer token off-origin)", req.URL.String())
+			},
+		},
 	}
 }
 

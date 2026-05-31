@@ -63,7 +63,10 @@ your private key.`,
 		}
 		defer zero(privKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		// 1. Pull the tree once and resolve the path locally. Costs

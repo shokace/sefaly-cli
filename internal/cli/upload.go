@@ -71,7 +71,10 @@ plaintext filename, or the file's symmetric key.
 		}
 		publicKeyB64 := base64StdString(publicKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		// Resolve --to ONCE (one tree fetch, one path walk) — much

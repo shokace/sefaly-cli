@@ -46,10 +46,18 @@ finish the job server-side.`,
 		var serverRevoked bool
 		var serverErr error
 		if existing != nil && existing.AccessToken != "" {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
-			client := api.New(resolveBaseURL(existing.APIBaseURL), existing.AccessToken)
-			serverErr = client.RevokeSelf(ctx)
-			cancel()
+			baseURL, baseErr := resolveBaseURL(existing.APIBaseURL)
+			if baseErr != nil {
+				// Don't block local logout on a bad stored URL — clear
+				// the credentials below regardless. Just note the
+				// server-side revoke can't happen and tell the user.
+				serverErr = baseErr
+			} else {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+				client := api.New(baseURL, existing.AccessToken)
+				serverErr = client.RevokeSelf(ctx)
+				cancel()
+			}
 			// 401 means the token was already invalid server-side
 			// (revoked / expired). Treat it as "already done", not an
 			// error — `sef logout` after the token's natural death

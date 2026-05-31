@@ -6,7 +6,10 @@ package cli
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/shokace/sefaly-cli/internal/api"
 	"github.com/spf13/cobra"
@@ -82,18 +85,64 @@ func Execute() int {
 //     `sefaly --api … login` is sticky for subsequent commands)
 //  4. The compiled-in default (https://www.sefaly.com)
 //
+// The resolved URL MUST use https://, except for loopback hosts
+// (localhost, 127.0.0.1, [::1]) which may use http:// for local
+// development. Plain http to a non-loopback host would send the
+// Bearer access token and the wrapped private key in cleartext,
+// which would collapse the zero-knowledge guarantee. Rejecting at
+// resolve time means a typo or a phishing prompt
+// ("set SEFALY_API_URL=http://...") fails loudly instead of
+// silently downgrading the transport.
+//
 // `storedURL` is the value the caller pulled from creds — empty if
 // the user isn't signed in. Kept as an argument rather than a creds
 // import so unauth'd commands (login) can call this too.
-func resolveBaseURL(storedURL string) string {
-	if apiBaseURL != "" {
-		return apiBaseURL
+func resolveBaseURL(storedURL string) (string, error) {
+	var resolved string
+	switch {
+	case apiBaseURL != "":
+		resolved = apiBaseURL
+	case os.Getenv("SEFALY_API_URL") != "":
+		resolved = os.Getenv("SEFALY_API_URL")
+	case storedURL != "":
+		resolved = storedURL
+	default:
+		resolved = api.DefaultBaseURL
 	}
-	if env := os.Getenv("SEFALY_API_URL"); env != "" {
-		return env
+	if err := validateAPIURL(resolved); err != nil {
+		return "", err
 	}
-	if storedURL != "" {
-		return storedURL
+	return resolved, nil
+}
+
+// validateAPIURL enforces https:// for any non-loopback host. Local
+// dev (http://localhost:3000 and friends) is still allowed because
+// nothing is on the wire between cooperating processes on the same
+// machine.
+func validateAPIURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("invalid API URL %q: %w", s, err)
 	}
-	return api.DefaultBaseURL
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && isLoopback(u.Host) {
+		return nil
+	}
+	return fmt.Errorf("API URL must use https:// (got %q). Loopback (localhost, 127.0.0.1, [::1]) may use http://", s)
+}
+
+func isLoopback(host string) bool {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	// Strip IPv6 brackets if the URL was bare like [::1] with no port.
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	switch h {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }

@@ -45,7 +45,10 @@ Devices panel on the web app.`,
 		// Honor `--api` / $SEFALY_API_URL but ignore any stored URL —
 		// this is a fresh login flow; the user might be re-pointing
 		// to a different host.
-		baseURL := resolveBaseURL("")
+		baseURL, err := resolveBaseURL("")
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, "")
 
 		// Step 1: ephemeral keypair. Lives only for this login.

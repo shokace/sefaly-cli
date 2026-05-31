@@ -65,7 +65,10 @@ recipients lose access in the same transaction.`,
 		}
 		defer zero(privKey)
 
-		baseURL := resolveBaseURL(stored.APIBaseURL)
+		baseURL, err := resolveBaseURL(stored.APIBaseURL)
+		if err != nil {
+			return err
+		}
 		client := api.New(baseURL, stored.AccessToken)
 
 		// One tree fetch shared across every arg — far cheaper than

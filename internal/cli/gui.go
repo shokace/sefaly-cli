@@ -93,7 +93,10 @@ func runGUI(cmd *cobra.Command) error {
 	}
 	publicKeyB64 := base64.StdEncoding.EncodeToString(publicKey)
 
-	baseURL := resolveBaseURL(stored.APIBaseURL)
+	baseURL, err := resolveBaseURL(stored.APIBaseURL)
+	if err != nil {
+		return err
+	}
 	client := api.New(baseURL, stored.AccessToken)
 
 	wd, err := os.Getwd()
