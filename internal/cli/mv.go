@@ -367,4 +367,3 @@ func samePtrString(a, b *string) bool {
 		return *a == *b
 	}
 }
-

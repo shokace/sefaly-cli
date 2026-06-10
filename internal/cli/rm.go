@@ -110,6 +110,12 @@ in the same transaction.`,
 		// nagging than one per file, and the rm <list> ergonomics
 		// people expect work that way.
 		if !rmForce {
+			// No terminal to prompt at (piped, CI, an agent): don't sit
+			// reading EOF — refuse clearly and point at --force, so the
+			// caller gets an actionable error instead of a silent abort.
+			if !isInteractive() {
+				return errors.New("refusing to delete without confirmation in a non-interactive context — pass -f/--force")
+			}
 			ok, err := confirm(fmt.Sprintf("Delete %d item%s? This cannot be undone. [y/N] ",
 				len(targets), pluralS(len(targets))))
 			if err != nil {

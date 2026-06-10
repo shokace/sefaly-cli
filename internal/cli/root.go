@@ -79,6 +79,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&apiBaseURL, "api", "",
 		"Override the API base URL (default: stored creds, then "+api.DefaultBaseURL+
 			"). Also honors $SEFALY_API_URL.")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false,
+		"Output machine-readable JSON instead of formatted text (for scripts + agents).")
 
 	rootCmd.Version = Version
 

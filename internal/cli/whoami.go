@@ -50,6 +50,26 @@ whoami will report it instead of silently lying.`,
 			return errors.New("server rejected your token — it may have been revoked. Run `sef login` to re-authorize.")
 		}
 
+		if jsonOutput {
+			out := map[string]any{
+				"email": stored.Email,
+				"api":   stored.APIBaseURL,
+			}
+			if stored.DeviceName != "" {
+				out["device"] = stored.DeviceName
+			}
+			if meErr == nil {
+				out["tier"] = me.Tier
+				out["storageUsedBytes"] = me.StorageUsedBytes
+				out["twoFactorEnabled"] = me.TotpEnabled
+				out["emailVerified"] = me.EmailVerifiedAt != ""
+				out["serverReachable"] = true
+			} else {
+				out["serverReachable"] = false
+			}
+			return emitJSON(out)
+		}
+
 		// Local view first so it's useful even if the server is
 		// unreachable; enrich with server data when we have it.
 		rows := [][2]string{{"Email", ui.Fg(stored.Email)}}

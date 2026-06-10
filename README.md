@@ -85,7 +85,7 @@ summary instead.
 | --- | --- |
 | `sef login` / `logout` / `whoami` | Authorize this device, sign out, show the account + storage |
 | `sef ls [path]` | List a folder (`--long` for size/time, `--tree` recursive) |
-| `sef put <file>… [--to <folder>]` | Encrypt + upload files (alias `upload`) |
+| `sef put <file>… [--to <folder>] [-r]` | Encrypt + upload files or whole folders (alias `upload`) |
 | `sef get <path> [-o <dest>]` | Download + decrypt a file (alias `download`) |
 | `sef mkdir <path> [-p]` | Create a folder |
 | `sef mv <src> <dst>` | Move or rename (end-to-end re-encrypts the name) |
@@ -135,6 +135,28 @@ it, and store only the ciphertext — the key rides in the URL fragment
 (after `#`), which browsers never send to the server, so Sefaly can't
 read your shared file. Direct shares re-wrap the file key to the
 recipient's ML-KEM-768 public key.
+
+## Scripting and agents
+
+`sef` is built to be driven by scripts and AI agents (e.g. Claude Code),
+not just typed by hand:
+
+- **Whole-folder upload:** `sef put -r ./project --to Backups` recreates
+  the folder tree and uploads every file, so "upload this folder" is one
+  command. Re-running it merges into the existing folder and auto-suffixes
+  any filename collisions.
+- **JSON output:** add `--json` to get machine-readable output instead of
+  formatted text — supported on `ls`, `info`, `whoami`, `trash`, and
+  `share`. For example, `sef ls Photos --json` returns an array of
+  `{name, type, id, sizeBytes, mimeType, modified}`, and
+  `sef share report.pdf --json` returns `{url, token, …}`.
+- **Non-interactive safety:** destructive commands won't hang waiting for
+  input when there's no terminal. `sef rm <path> -f` deletes without a
+  prompt; without `-f` in a pipe/CI/agent it errors clearly rather than
+  stalling.
+- **No re-auth per command:** once you've run `sef login`, the token lives
+  in your OS keychain and every later command uses it, so an agent can
+  list, upload, and share on your behalf without re-approval.
 
 ## How the auth works (in short)
 

@@ -193,7 +193,7 @@ func buildFileAAD(version, algorithm, kemType string) []byte {
 // memory — the public key is literally a substring of the private
 // key in the standardized layout:
 //
-//   dk = dkPKE (1152) || ek (1184) || H(ek) (32) || z (32) = 2400 bytes
+//	dk = dkPKE (1152) || ek (1184) || H(ek) (32) || z (32) = 2400 bytes
 //
 // For ML-KEM-768 the ek slice is bytes [1152, 2336).
 func PublicKeyFromPrivate(privKeyBytes []byte) ([]byte, error) {
@@ -255,11 +255,11 @@ type UploadCrypto struct {
 //   - NameKeyWrapped       → nameKeyWrapped
 //   - NameKeyWrapNonce     → nameKeyWrapNonce
 type FolderNameCrypto struct {
-	EncryptedNameB64     string
-	NameNonceB64         string
-	NameKeyEncapsulated  string
-	NameKeyWrapped       string
-	NameKeyWrapNonce     string
+	EncryptedNameB64    string
+	NameNonceB64        string
+	NameKeyEncapsulated string
+	NameKeyWrapped      string
+	NameKeyWrapNonce    string
 }
 
 // EncryptFolderName generates a fresh per-folder symmetric key,

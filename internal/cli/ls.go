@@ -99,13 +99,38 @@ ciphertext.`,
 			return err
 		}
 
-		if lsTree {
-			return printTree(targetFolderID, foldersByParent, filesByParent, privKey, 0)
-		}
-
 		// Flat listing of the resolved folder's immediate children.
 		folders := foldersByParent[strPtrKey(targetFolderID)]
 		files := filesByParent[strPtrKey(targetFolderID)]
+
+		if jsonOutput {
+			type item struct {
+				Name      string `json:"name"`
+				Type      string `json:"type"`
+				ID        string `json:"id"`
+				SizeBytes string `json:"sizeBytes,omitempty"`
+				MimeType  string `json:"mimeType,omitempty"`
+				Modified  string `json:"modified"`
+			}
+			out := []item{}
+			for _, f := range folders {
+				name, _ := folderDisplayName(f, privKey)
+				out = append(out, item{Name: name, Type: "folder", ID: f.ID, Modified: f.UpdatedAt})
+			}
+			for _, f := range files {
+				name, _ := fileDisplayName(f, privKey)
+				mt := ""
+				if f.MimeType != nil {
+					mt = *f.MimeType
+				}
+				out = append(out, item{Name: name, Type: "file", ID: f.ID, SizeBytes: f.SizeBytes, MimeType: mt, Modified: f.UpdatedAt})
+			}
+			return emitJSON(out)
+		}
+
+		if lsTree {
+			return printTree(targetFolderID, foldersByParent, filesByParent, privKey, 0)
+		}
 
 		entries := make([]entry, 0, len(folders)+len(files))
 		for _, f := range folders {

@@ -54,6 +54,24 @@ delete them for good.
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			type ti struct {
+				Name      string `json:"name"`
+				ID        string `json:"id"`
+				SizeBytes string `json:"sizeBytes"`
+				DeletedAt string `json:"deletedAt,omitempty"`
+			}
+			out := []ti{}
+			for _, f := range files {
+				name, _ := fileDisplayName(f, privKey)
+				da := ""
+				if f.DeletedAt != nil {
+					da = *f.DeletedAt
+				}
+				out = append(out, ti{Name: name, ID: f.ID, SizeBytes: f.SizeBytes, DeletedAt: da})
+			}
+			return emitJSON(out)
+		}
 		if len(files) == 0 {
 			fmt.Println(ui.Mutedf("  Trash is empty."))
 			return nil

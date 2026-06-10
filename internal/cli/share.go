@@ -113,6 +113,9 @@ Manage shares with ` + "`sef share ls`" + ` and ` + "`sef share revoke <id>`" + 
 			if err := client.ShareFileWithUser(ctx, fileID, recipientID, wrap.EncapsulatedKeyB64, wrap.WrappedKeyB64, wrap.KeyWrapNonceB64); err != nil {
 				return fmt.Errorf("creating share: %w", err)
 			}
+			if jsonOutput {
+				return emitJSON(map[string]any{"type": "direct", "file": args[0], "recipient": shareTo})
+			}
 			fmt.Println(ui.Success_(fmt.Sprintf("Shared %s with %s (end-to-end).", args[0], ui.Boldf(shareTo))))
 			return nil
 		}
@@ -151,6 +154,20 @@ Manage shares with ` + "`sef share ls`" + ` and ` + "`sef share revoke <id>`" + 
 		}
 		url := strings.TrimRight(baseURL, "/") + "/s/" + ref + "#" + cryptox.LinkKeyToFragment(linkKey)
 
+		if jsonOutput {
+			res := map[string]any{"type": "public-link", "file": args[0], "url": url, "token": token}
+			if slug != "" {
+				res["slug"] = slug
+			}
+			if opt.ExpiresInDays != nil {
+				res["expiresInDays"] = *opt.ExpiresInDays
+			}
+			if opt.MaxDownloads != nil {
+				res["maxDownloads"] = *opt.MaxDownloads
+			}
+			return emitJSON(res)
+		}
+
 		fmt.Println()
 		fmt.Println(ui.Success_("Public link created."))
 		fmt.Println("  " + ui.Accentf(url))
@@ -188,6 +205,9 @@ var shareLsCmd = &cobra.Command{
 				return errors.New("server rejected your token — run `sef login` to re-authorize")
 			}
 			return fmt.Errorf("listing shares: %w", err)
+		}
+		if jsonOutput {
+			return emitJSON(out)
 		}
 		total := len(out.PublicLinks) + len(out.Files) + len(out.Folders)
 		if total == 0 {

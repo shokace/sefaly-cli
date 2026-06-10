@@ -77,6 +77,28 @@ func printFileInfo(tree *api.TreeResponse, fileID string, privKey []byte) error 
 		ver = v
 	}
 
+	if jsonOutput {
+		mt := ""
+		if f.MimeType != nil {
+			mt = *f.MimeType
+		}
+		return emitJSON(map[string]any{
+			"id":        f.ID,
+			"name":      name,
+			"type":      "file",
+			"mimeType":  mt,
+			"sizeBytes": f.SizeBytes,
+			"path":      folderPathOf(f.FolderID, tree, privKey) + name,
+			"created":   f.CreatedAt,
+			"modified":  f.UpdatedAt,
+			"encryption": map[string]string{
+				"algorithm": "AES-256-GCM",
+				"kem":       "ML-KEM-768",
+				"version":   ver,
+			},
+		})
+	}
+
 	fmt.Println()
 	fmt.Println("  " + ui.Boldf(name))
 	fmt.Println(ui.KV([][2]string{
@@ -116,6 +138,19 @@ func printFolderInfo(tree *api.TreeResponse, folderID string, privKey []byte) er
 		if strPtrKey(fi.FolderID) == folderID {
 			subFiles++
 		}
+	}
+
+	if jsonOutput {
+		return emitJSON(map[string]any{
+			"id":          fo.ID,
+			"name":        name,
+			"type":        "folder",
+			"path":        folderPathOf(fo.ParentID, tree, privKey) + name + "/",
+			"folderCount": subFolders,
+			"fileCount":   subFiles,
+			"created":     fo.CreatedAt,
+			"modified":    fo.UpdatedAt,
+		})
 	}
 
 	fmt.Println()

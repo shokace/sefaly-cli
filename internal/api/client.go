@@ -583,7 +583,7 @@ func (c *Client) CreateFolder(ctx context.Context, req *CreateFolderRequest) (*C
 //
 //   - key absent           → leave field alone
 //   - key present, null    → move-to-root (folderId=null /
-//                            parentId=null) on files / folders
+//     parentId=null) on files / folders
 //   - key present, string  → set to value
 //
 // Go's `omitempty` + `*string` collapses the first two states (a
@@ -591,8 +591,8 @@ func (c *Client) CreateFolder(ctx context.Context, req *CreateFolderRequest) (*C
 // so we drop the struct shape here and let the command layer hand
 // us a map. Keys the server understands:
 //
-//   files:    folderId, originalFilename, encryptedFilename, filenameNonce
-//   folders:  parentId, name, encryptedName, nameNonce
+//	files:    folderId, originalFilename, encryptedFilename, filenameNonce
+//	folders:  parentId, name, encryptedName, nameNonce
 //
 // Anything else is ignored by the server.
 func (c *Client) PatchFile(ctx context.Context, fileID string, body map[string]interface{}) error {
@@ -714,13 +714,13 @@ func (c *Client) CreateFilePublicLink(ctx context.Context, fileID, encryptedPayl
 // OutgoingShares is the caller's outbound share inventory.
 type OutgoingShares struct {
 	Files []struct {
-		ID            string `json:"id"`
+		ID             string `json:"id"`
 		RecipientEmail string `json:"recipientEmail"`
 	} `json:"files"`
 	Folders []struct {
-		ID            string `json:"id"`
+		ID             string `json:"id"`
 		RecipientEmail string `json:"recipientEmail"`
-		FileCount     int    `json:"fileCount"`
+		FileCount      int    `json:"fileCount"`
 	} `json:"folders"`
 	PublicLinks []struct {
 		ID         string  `json:"id"`

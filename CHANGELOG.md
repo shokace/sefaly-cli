@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions correspond to the git tag GoReleaser builds from (e.g. `v0.1.1`).
 
+## [0.1.4] - 2026-06-11
+
+Make the CLI scriptable + agent-friendly, so a tool like Claude Code can
+drive it from natural language ("upload this folder to my cloud").
+
+### Added
+- `sef put -r <dir>` (`--recursive`): upload a directory and its contents,
+  recreating the folder structure. Reuses existing cloud folders of the
+  same name (so re-uploads merge), resolves filename collisions per
+  folder, and skips symlinks/devices. In the interactive shell, `put <dir>`
+  is recursive automatically.
+- Global `--json` flag for machine-readable output on `ls`, `info`,
+  `whoami`, `trash`, and `share` (link creation + `share ls`). Lets agents
+  and scripts parse results instead of scraping formatted text.
+
+### Changed
+- `rm` without `-f` now fails fast with a clear, actionable error in a
+  non-interactive context (pipe, CI, an agent) instead of silently
+  aborting when it can't read a confirmation.
+
 ## [0.1.3] - 2026-06-11
 
 ### Fixed
@@ -94,6 +114,7 @@ Initial release.
 - A two-pane file-manager TUI (`sef gui`).
 - GoReleaser cross-platform release pipeline.
 
+[0.1.4]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.1

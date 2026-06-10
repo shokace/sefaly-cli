@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"mime"
 	"os"
 	"path/filepath"
@@ -23,11 +24,14 @@ func init() {
 			"Example: --to Photos/2026/Trip")
 	uploadCmd.Flags().BoolVar(&uploadOverwrite, "overwrite", false,
 		"Replace an existing file with the same name instead of keeping both (auto-suffixed).")
+	uploadCmd.Flags().BoolVarP(&uploadRecursive, "recursive", "r", false,
+		"Upload a directory and its contents, recreating the folder structure.")
 }
 
 var (
 	uploadTo        string
 	uploadOverwrite bool
+	uploadRecursive bool
 )
 
 var uploadCmd = &cobra.Command{
@@ -117,6 +121,24 @@ plaintext filename, or the file's symmetric key.
 			if len(args) > 1 {
 				fmt.Printf("[%d/%d] ", i+1, len(args))
 			}
+
+			// Directories: recurse (with -r) by recreating the structure
+			// and uploading every file; otherwise refuse with a hint.
+			if info, statErr := os.Stat(arg); statErr == nil && info.IsDir() {
+				if !uploadRecursive {
+					fmt.Fprintf(os.Stderr, "  %s is a directory — pass -r to upload it recursively\n", arg)
+					hadError = true
+					continue
+				}
+				n, derr := uploadDir(cmd.Context(), client, privKey, publicKeyB64, arg, folderID, tree)
+				fmt.Printf("  ✓ Uploaded %d file(s) from %s\n", n, filepath.Base(arg))
+				if derr != nil {
+					fmt.Fprintf(os.Stderr, "  Error uploading %s: %v\n", arg, derr)
+					hadError = true
+				}
+				continue
+			}
+
 			desired := filepath.Base(arg)
 			finalName := desired
 			overwriteID := ""
@@ -150,6 +172,103 @@ plaintext filename, or the file's symmetric key.
 		}
 		return nil
 	},
+}
+
+// uploadDir recursively uploads a local directory: it recreates the
+// folder structure under baseFolderID (reusing any existing cloud folder
+// of the same name, so re-uploads merge) and uploads every regular file,
+// resolving filename collisions per destination folder. Returns the
+// number of files uploaded. Symlinks, devices, and sockets are skipped.
+func uploadDir(
+	parentCtx context.Context,
+	client *api.Client,
+	privKey []byte,
+	publicKeyB64 string,
+	localDir string,
+	baseFolderID *string,
+	tree *api.TreeResponse,
+) (int, error) {
+	localDir = filepath.Clean(localDir)
+
+	findOrCreate := func(parent *string, name string) (*string, error) {
+		if id := findChildFolderID(tree, parent, name, privKey); id != nil {
+			return id, nil
+		}
+		id, err := createOneFolder(parentCtx, client, tree, parent, name, publicKeyB64)
+		if err != nil {
+			return nil, err
+		}
+		return &id, nil
+	}
+
+	rootID, err := findOrCreate(baseFolderID, filepath.Base(localDir))
+	if err != nil {
+		return 0, fmt.Errorf("creating %q: %w", filepath.Base(localDir), err)
+	}
+
+	cloudIDFor := map[string]*string{localDir: rootID}
+	// Cache the taken-name set per destination folder, populated lazily +
+	// reserved as we go so two local files with the same name still land
+	// uniquely.
+	taken := map[string]map[string]string{}
+	takenFor := func(id *string) map[string]string {
+		k := strPtrKey(id)
+		if taken[k] == nil {
+			taken[k] = folderFileNames(tree, id, privKey)
+		}
+		return taken[k]
+	}
+
+	uploaded := 0
+	walkErr := filepath.WalkDir(localDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if path == localDir {
+				return nil // root already created
+			}
+			id, cerr := findOrCreate(cloudIDFor[filepath.Dir(path)], d.Name())
+			if cerr != nil {
+				return cerr
+			}
+			cloudIDFor[path] = id
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		parentID := cloudIDFor[filepath.Dir(path)]
+		t := takenFor(parentID)
+		finalName := d.Name()
+		overwriteID := ""
+		if oldID, clash := t[d.Name()]; clash {
+			if uploadOverwrite {
+				overwriteID = oldID
+			} else {
+				finalName = uniqueFileName(d.Name(), t)
+			}
+		}
+		t[finalName] = "pending"
+		if uerr := uploadOne(parentCtx, client, path, parentID, publicKeyB64, finalName); uerr != nil {
+			fmt.Fprintf(os.Stderr, "  Error uploading %s: %v\n", path, uerr)
+			return nil // keep going with the rest of the tree
+		}
+		if overwriteID != "" {
+			dctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+			_ = client.DeleteFile(dctx, overwriteID)
+			cancel()
+		}
+		uploaded++
+		return nil
+	})
+	return uploaded, walkErr
 }
 
 // uploadOne handles a single file: read → encrypt → init → PUT →

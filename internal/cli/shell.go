@@ -211,6 +211,7 @@ func (s *shellSession) put(ctx context.Context, args []string) {
 	}
 	resetSubFlags()
 	uploadTo = s.rel(s.cwdPath) // "" = root
+	uploadRecursive = true      // in the shell, `put <dir>` just works
 	s.runSub(ctx, uploadCmd, args)
 }
 
@@ -327,7 +328,7 @@ func friendlyErr(err error) string {
 func resetSubFlags() {
 	lsLong, lsTree = false, false
 	downloadOut, downloadForce = "", false
-	uploadTo, uploadOverwrite = "", false
+	uploadTo, uploadOverwrite, uploadRecursive = "", false, false
 	mkdirParents = false
 	cpOverwrite, mvOverwrite = false, false
 	rmForce, rmRecursive = false, false
