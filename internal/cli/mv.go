@@ -13,8 +13,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var mvOverwrite bool
+
 func init() {
 	rootCmd.AddCommand(mvCmd)
+	mvCmd.Flags().BoolVar(&mvOverwrite, "overwrite", false,
+		"Replace a file with the same name at the destination instead of keeping both (auto-suffixed).")
 }
 
 var mvCmd = &cobra.Command{
@@ -152,19 +156,9 @@ func resolveMoveDestination(
 		)
 	}
 
-	// Refuse if the destination already exists as a file. The user
-	// can rm it first if they really want.
-	filesByParent := indexFilesByParent(tree.Files)
-	for _, f := range filesByParent[strPtrKey(parent)] {
-		display, derr := fileDisplayName(f, privKey)
-		if derr != nil {
-			continue
-		}
-		if display == last {
-			return nil, "", fmt.Errorf("destination %q already exists as a file — `sef rm` it first if you want to replace", dst)
-		}
-	}
-
+	// A same-named file at the destination is NOT an error here — the
+	// caller (moveFile) resolves it by auto-suffixing or, with
+	// --overwrite, replacing.
 	return parent, last, nil
 }
 
@@ -208,9 +202,24 @@ func moveFile(
 		}
 	}
 
-	// Rename part: if newName is non-empty, re-encrypt under the
-	// existing file key with a fresh nonce.
-	if newName != "" {
+	// Name part. The desired name is the explicit rename target, or the
+	// source's current name when moving into a folder. Resolve any
+	// collision at the destination (auto-suffix, or --overwrite to
+	// replace), then re-encrypt the name only if it actually changes.
+	srcName, err := fileDisplayName(*src, privKey)
+	if err != nil {
+		return fmt.Errorf("reading source name: %w", err)
+	}
+	desired := newName
+	if desired == "" {
+		desired = srcName
+	}
+	finalName, overwriteID, suffixed := resolveNameCollision(tree, newParent, desired, fileID, privKey, mvOverwrite)
+	if suffixed {
+		fmt.Printf("  a file named %q already exists there — moving as %q (use --overwrite to replace)\n", desired, finalName)
+	}
+
+	if finalName != srcName {
 		fileKey, err := cryptox.UnwrapFileKey(
 			privKey,
 			src.EncapsulatedKey,
@@ -221,7 +230,7 @@ func moveFile(
 			return fmt.Errorf("unwrapping file key for rename: %w", err)
 		}
 		defer zero(fileKey)
-		encName, nonce, err := cryptox.EncryptNameWithKey(newName, fileKey)
+		encName, nonce, err := cryptox.EncryptNameWithKey(finalName, fileKey)
 		if err != nil {
 			return fmt.Errorf("encrypting new filename: %w", err)
 		}
@@ -233,7 +242,16 @@ func moveFile(
 		return errors.New("nothing to do — source and destination are the same")
 	}
 
-	return client.PatchFile(ctx, fileID, body)
+	if err := client.PatchFile(ctx, fileID, body); err != nil {
+		return err
+	}
+	// With --overwrite, drop the file we replaced (after the move lands).
+	if overwriteID != "" {
+		if err := client.DeleteFile(ctx, overwriteID); err != nil {
+			return fmt.Errorf("moved, but couldn't remove the replaced %q: %w", desired, err)
+		}
+	}
+	return nil
 }
 
 // moveFolder issues PATCH /api/folders/:id with the right

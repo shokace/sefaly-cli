@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/shokace/sefaly-cli/internal/api"
@@ -12,8 +13,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var cpOverwrite bool
+
 func init() {
 	rootCmd.AddCommand(cpCmd)
+	cpCmd.Flags().BoolVar(&cpOverwrite, "overwrite", false,
+		"Replace an existing file with the same name instead of keeping both (auto-suffixed).")
 }
 
 var cpCmd = &cobra.Command{
@@ -67,6 +72,35 @@ the web app's share→copy flow.`,
 			return err
 		}
 
+		// The locate the source row (its key is reused for the copy + any
+		// rename) and its current name.
+		var src *api.File
+		for i := range tree.Files {
+			if tree.Files[i].ID == srcFileID {
+				src = &tree.Files[i]
+				break
+			}
+		}
+		if src == nil {
+			return errors.New("source file not found")
+		}
+		srcName, err := fileDisplayName(*src, privKey)
+		if err != nil {
+			return fmt.Errorf("reading source name: %w", err)
+		}
+
+		// What the copy should be called, then resolve any collision in
+		// the destination. excludeID is "" because the original stays put,
+		// so the copy must not reuse its name.
+		desired := newName
+		if desired == "" {
+			desired = srcName
+		}
+		finalName, overwriteID, suffixed := resolveNameCollision(tree, destParent, desired, "", privKey, cpOverwrite)
+		if suffixed {
+			fmt.Printf("  %q already exists there — copying as %q (use --overwrite to replace)\n", desired, finalName)
+		}
+
 		newID, err := client.DuplicateFile(ctx, srcFileID, destParent)
 		if err != nil {
 			if api.IsStatus(err, 413) {
@@ -75,26 +109,15 @@ the web app's share→copy flow.`,
 			return fmt.Errorf("copying: %w", err)
 		}
 
-		// Rename the copy if the destination specified a new name.
-		if newName != "" {
-			var src *api.File
-			for i := range tree.Files {
-				if tree.Files[i].ID == srcFileID {
-					src = &tree.Files[i]
-					break
-				}
-			}
-			if src == nil {
-				return errors.New("source file vanished mid-copy")
-			}
-			// The copy shares the source's file key (wrap material reused),
-			// so re-encrypt the new name under that same key.
+		// DuplicateFile reuses the source's encrypted name, so rename the
+		// copy whenever the final name differs from the source's name.
+		if finalName != srcName {
 			fileKey, err := cryptox.UnwrapFileKey(privKey, src.EncapsulatedKey, src.EncryptedFileKey, src.KeyWrapNonce())
 			if err != nil {
 				return fmt.Errorf("copied, but renaming failed (unwrap): %w", err)
 			}
 			defer zero(fileKey)
-			encName, nonce, err := cryptox.EncryptNameWithKey(newName, fileKey)
+			encName, nonce, err := cryptox.EncryptNameWithKey(finalName, fileKey)
 			if err != nil {
 				return fmt.Errorf("copied, but renaming failed (encrypt): %w", err)
 			}
@@ -103,6 +126,13 @@ the web app's share→copy flow.`,
 				"filenameNonce":     nonce,
 			}); err != nil {
 				return fmt.Errorf("copied, but renaming failed: %w", err)
+			}
+		}
+
+		// With --overwrite, drop the file we replaced (after the copy lands).
+		if overwriteID != "" {
+			if err := client.DeleteFile(ctx, overwriteID); err != nil {
+				fmt.Fprintln(os.Stderr, ui.Warn_(fmt.Sprintf("copied, but couldn't remove the previous %q: %v", desired, err)))
 			}
 		}
 

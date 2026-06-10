@@ -327,8 +327,9 @@ func friendlyErr(err error) string {
 func resetSubFlags() {
 	lsLong, lsTree = false, false
 	downloadOut, downloadForce = "", false
-	uploadTo = ""
+	uploadTo, uploadOverwrite = "", false
 	mkdirParents = false
+	cpOverwrite, mvOverwrite = false, false
 	rmForce, rmRecursive = false, false
 	shareTo, shareSlug = "", ""
 	shareExpires, shareMaxDowns = 0, 0

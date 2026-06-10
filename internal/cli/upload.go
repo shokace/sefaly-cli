@@ -21,9 +21,14 @@ func init() {
 	uploadCmd.Flags().StringVarP(&uploadTo, "to", "t", "",
 		"Folder to upload into, as a slash-separated path (default: root). "+
 			"Example: --to Photos/2026/Trip")
+	uploadCmd.Flags().BoolVar(&uploadOverwrite, "overwrite", false,
+		"Replace an existing file with the same name instead of keeping both (auto-suffixed).")
 }
 
-var uploadTo string
+var (
+	uploadTo        string
+	uploadOverwrite bool
+)
 
 var uploadCmd = &cobra.Command{
 	Use:     "upload <file>...",
@@ -77,25 +82,31 @@ plaintext filename, or the file's symmetric key.
 		}
 		client := api.New(baseURL, stored.AccessToken)
 
-		// Resolve --to ONCE (one tree fetch, one path walk) — much
-		// cheaper than re-resolving per file.
+		// Fetch the tree once: needed both to resolve --to AND to detect
+		// name collisions in the target folder. The server can't dedupe
+		// names (they're encrypted), so we do it here.
+		ctxTree, cancelTree := context.WithTimeout(cmd.Context(), 30*time.Second)
+		tree, treeErr := client.Tree(ctxTree)
+		cancelTree()
+		if treeErr != nil {
+			if api.IsStatus(treeErr, 401) {
+				return errors.New("server rejected your token — run `sef login` to re-authorize")
+			}
+			return fmt.Errorf("fetching file tree: %w", treeErr)
+		}
 		var folderID *string
 		if uploadTo != "" {
-			ctxTree, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-			tree, treeErr := client.Tree(ctxTree)
-			cancel()
-			if treeErr != nil {
-				if api.IsStatus(treeErr, 401) {
-					return errors.New("server rejected your token — run `sef login` to re-authorize")
-				}
-				return fmt.Errorf("fetching file tree for --to lookup: %w", treeErr)
-			}
 			id, err := resolvePath(uploadTo, tree.Folders, privKey)
 			if err != nil {
 				return err
 			}
 			folderID = id
 		}
+
+		// Names already taken in the destination folder → file ids, so a
+		// collision can either auto-suffix "(N)" (default) or, with
+		// --overwrite, replace the existing file after the new one lands.
+		existing := folderFileNames(tree, folderID, privKey)
 
 		// Upload each file sequentially. Could parallelize, but the
 		// quota check happens at /complete with serializable isolation
@@ -106,9 +117,32 @@ plaintext filename, or the file's symmetric key.
 			if len(args) > 1 {
 				fmt.Printf("[%d/%d] ", i+1, len(args))
 			}
-			if err := uploadOne(cmd.Context(), client, arg, folderID, publicKeyB64); err != nil {
+			desired := filepath.Base(arg)
+			finalName := desired
+			overwriteID := ""
+			if oldID, clash := existing[desired]; clash {
+				if uploadOverwrite {
+					overwriteID = oldID
+				} else {
+					finalName = uniqueFileName(desired, existing)
+					fmt.Printf("  %q already exists here — saving as %q (use --overwrite to replace)\n", desired, finalName)
+				}
+			}
+			// Reserve the chosen name so a later file in the same batch
+			// can't pick it too.
+			existing[finalName] = "pending"
+
+			if err := uploadOne(cmd.Context(), client, arg, folderID, publicKeyB64, finalName); err != nil {
 				fmt.Fprintf(os.Stderr, "  Error uploading %s: %v\n", filepath.Base(arg), err)
 				hadError = true
+				continue
+			}
+			if overwriteID != "" {
+				delCtx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+				if derr := client.DeleteFile(delCtx, overwriteID); derr != nil {
+					fmt.Fprintf(os.Stderr, "  Uploaded, but couldn't remove the previous %q (it's in Trash-able state): %v\n", desired, derr)
+				}
+				cancel()
 			}
 		}
 		if hadError {
@@ -128,6 +162,7 @@ func uploadOne(
 	localPath string,
 	folderID *string,
 	publicKeyB64 string,
+	displayName string,
 ) error {
 	// Read once into memory. Streaming AES-GCM seal exists but the
 	// AEAD interface here doesn't expose it, and the upload PUT
@@ -146,7 +181,10 @@ func uploadOne(
 		return errors.New("is a directory (folder uploads aren't implemented yet)")
 	}
 
-	basename := filepath.Base(localPath)
+	// The stored (encrypted) name is the collision-resolved displayName,
+	// which may differ from the local basename (e.g. "report (1).pdf").
+	// It keeps the original extension, so MIME detection is unaffected.
+	basename := displayName
 	// Strip any parameters from the detected media type. Go's
 	// `mime.TypeByExtension(".txt")` returns "text/plain; charset=utf-8",
 	// but the server's MIME_TYPE_REGEX rejects anything with a

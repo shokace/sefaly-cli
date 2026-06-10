@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions correspond to the git tag GoReleaser builds from (e.g. `v0.1.1`).
 
+## [0.1.3] - 2026-06-11
+
+### Fixed
+- Duplicate filenames in the same folder are no longer created. Because
+  filenames are end-to-end encrypted, the server can't enforce
+  uniqueness, so the client now does: `put`, `cp`, and `mv` detect a
+  same-named file in the destination and auto-suffix `(1)`, `(2)`, …
+  (Finder/Drive style), keeping the original. Pass `--overwrite` to
+  replace the existing file instead. `mv` previously hard-errored on a
+  collision; it now resolves it like the others.
+
 ## [0.1.2] - 2026-06-11
 
 ### Fixed
@@ -83,6 +94,7 @@ Initial release.
 - A two-pane file-manager TUI (`sef gui`).
 - GoReleaser cross-platform release pipeline.
 
+[0.1.3]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.0
