@@ -42,9 +42,10 @@ Mirrors Unix rm conventions:
   sef rm -f throwaway.txt        # skip the confirmation prompt
   sef rm a.txt b.txt c.txt       # multi-file
 
-Deletion is server-authoritative and immediate — no trash bin, no undo
-(unlike the dashboard's optimistic UI). If you delete a shared folder,
-recipients lose access in the same transaction.`,
+Deleted files go to Trash and are kept for 30 days — restore or purge
+them with ` + "`sef trash`" + `. Folder deletion is permanent and immediate (no
+folder trash yet). If you delete a shared folder, recipients lose access
+in the same transaction.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		stored, err := creds.Load()
