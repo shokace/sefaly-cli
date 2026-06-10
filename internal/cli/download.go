@@ -103,79 +103,51 @@ your private key.`,
 			}
 		}
 
-		// 3. Get the presigned download URL + the wrap material.
-		// /api/files/[id]/url returns ownerWrap for files we own;
-		// share recipients get only the URL (file-share table holds
-		// their wrap material separately, not implemented here yet).
-		urlCtx, urlCancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-		defer urlCancel()
-		info, err := client.FileURL(urlCtx, file.ID)
-		if err != nil {
-			return fmt.Errorf("requesting download URL: %w", err)
-		}
-		if info.OwnerWrap == nil {
-			// We hit /api/files/[id]/url for a file we don't own —
-			// shouldn't happen for a tree resolution that only walks
-			// our own folders, but handle defensively. Once share
-			// support lands this branch becomes the "use recipient
-			// wrap" path.
-			return errors.New("server didn't return wrap material — share-recipient downloads not implemented yet")
-		}
-		wrap := info.OwnerWrap
-
-		// 4. Download the ciphertext from wherever the server pointed
-		// us. In prod that's a presigned R2 URL (off-host); in dev
-		// it's a same-origin streaming endpoint. Either way the
-		// FetchCiphertext helper does the right thing.
+		// 3-7. Get the URL + wrap material, download, unwrap, decrypt,
+		// and write atomically — shared with the interactive shell.
 		fmt.Printf("  Downloading %s…\n", decryptedName)
 		dlCtx, dlCancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 		defer dlCancel()
-		ciphertext, err := client.FetchCiphertext(dlCtx, info.DownloadURL)
+		n, err := downloadFileTo(dlCtx, client, privKey, file.ID, outPath)
 		if err != nil {
-			return fmt.Errorf("downloading ciphertext: %w", err)
+			return err
 		}
-
-		// 5. Unwrap the per-file symmetric key.
-		fileKey, err := cryptox.UnwrapFileKey(
-			privKey,
-			wrap.EncapsulatedKey,
-			wrap.WrappedFileKey,
-			wrap.KeyWrapNonce,
-		)
-		if err != nil {
-			return fmt.Errorf("unwrapping file key: %w", err)
-		}
-		defer zero(fileKey)
-
-		// 6. Decrypt the file content. v1.2 binds AAD to the
-		// canonical metadata; cryptox.DecryptFileContent rebuilds
-		// the same AAD the browser used at upload time, so a
-		// server-side metadata tweak fails GCM auth instead of
-		// quietly producing wrong bytes.
-		plaintext, err := cryptox.DecryptFileContent(
-			fileKey,
-			wrap.Nonce,
-			wrap.EncryptionVersion,
-			ciphertext,
-		)
-		if err != nil {
-			return fmt.Errorf("decrypting file: %w", err)
-		}
-		// Scrub the plaintext-buffer slice header once we've written
-		// out; the bytes themselves get GC'd whenever they're done.
-
-		// 7. Write to disk atomically — write to a tempfile in the
-		// destination directory and rename. A crash mid-write
-		// otherwise leaves a half-written file with the real name
-		// that an `--force=false` rerun would refuse to clobber.
-		if err := atomicWriteFile(outPath, plaintext); err != nil {
-			return fmt.Errorf("writing %s: %w", outPath, err)
-		}
-
 		abs, _ := filepath.Abs(outPath)
-		fmt.Printf("  Saved %d bytes to %s\n", len(plaintext), abs)
+		fmt.Printf("  Saved %d bytes to %s\n", n, abs)
 		return nil
 	},
+}
+
+// downloadFileTo runs the fetch→unwrap→decrypt→write core for a file
+// id, writing the plaintext to outPath atomically and returning the
+// byte count. Shared by the `download` command and the interactive
+// shell. The caller picks outPath + enforces any overwrite policy first.
+func downloadFileTo(ctx context.Context, client *api.Client, privKey []byte, fileID, outPath string) (int, error) {
+	info, err := client.FileURL(ctx, fileID)
+	if err != nil {
+		return 0, fmt.Errorf("requesting download URL: %w", err)
+	}
+	if info.OwnerWrap == nil {
+		return 0, errors.New("server didn't return wrap material — share-recipient downloads not implemented yet")
+	}
+	wrap := info.OwnerWrap
+	ciphertext, err := client.FetchCiphertext(ctx, info.DownloadURL)
+	if err != nil {
+		return 0, fmt.Errorf("downloading ciphertext: %w", err)
+	}
+	fileKey, err := cryptox.UnwrapFileKey(privKey, wrap.EncapsulatedKey, wrap.WrappedFileKey, wrap.KeyWrapNonce)
+	if err != nil {
+		return 0, fmt.Errorf("unwrapping file key: %w", err)
+	}
+	defer zero(fileKey)
+	plaintext, err := cryptox.DecryptFileContent(fileKey, wrap.Nonce, wrap.EncryptionVersion, ciphertext)
+	if err != nil {
+		return 0, fmt.Errorf("decrypting file: %w", err)
+	}
+	if err := atomicWriteFile(outPath, plaintext); err != nil {
+		return 0, fmt.Errorf("writing %s: %w", outPath, err)
+	}
+	return len(plaintext), nil
 }
 
 // resolveFile walks a slash-separated path (folders…/filename),

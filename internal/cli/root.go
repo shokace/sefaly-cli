@@ -52,11 +52,27 @@ Sign out:      sef logout
 More at https://www.sefaly.com.`,
 	SilenceUsage:  true, // don't dump --help on every error; the error message is enough
 	SilenceErrors: true, // we print our own
-	// Bare `sef` (no subcommand) shows the branded welcome instead of
-	// Cobra's default usage dump. `--help` and subcommands are unaffected.
-	Run: func(cmd *cobra.Command, args []string) {
+	// Bare `sef` (no subcommand): on an interactive terminal, drop into
+	// the cloud shell (banner + REPL). When piped / redirected / in CI,
+	// print the branded welcome instead — predictable + scriptable.
+	// `--help` and subcommands are unaffected.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if isInteractive() {
+			return runShell()
+		}
 		printWelcome()
+		return nil
 	},
+}
+
+// isInteractive reports whether stdin is a terminal (vs a pipe/redirect/
+// CI). Drives whether bare `sef` enters the REPL or prints the welcome.
+func isInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func init() {
