@@ -267,6 +267,7 @@ type File struct {
 	EncryptionMetadata map[string]interface{} `json:"encryptionMetadata"`
 	CreatedAt          string                 `json:"createdAt"`
 	UpdatedAt          string                 `json:"updatedAt"`
+	DeletedAt          *string                `json:"deletedAt,omitempty"` // set only on Trash rows
 }
 
 // KeyWrapNonce extracts the AES-GCM nonce used to wrap the file key,
@@ -548,6 +549,33 @@ func (c *Client) PatchFolder(ctx context.Context, folderID string, body map[stri
 // support from the underlying cipher; the AEAD interface used here
 // doesn't support it. Acceptable for the MVP — typical Sefaly files
 // fit comfortably.
+// ---- Trash ----
+
+// TrashList returns the caller's soft-deleted files (GET /api/trash).
+// Each row carries the same encrypted-name material as a tree File, so
+// names decrypt with the existing helpers.
+func (c *Client) TrashList(ctx context.Context) ([]File, error) {
+	var out struct {
+		Files []File `json:"files"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/trash", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Files, nil
+}
+
+// TrashRestore restores trashed files by id (POST /api/trash). The
+// server re-checks quota; a 413 means the restore would exceed storage.
+func (c *Client) TrashRestore(ctx context.Context, fileIDs []string) error {
+	return c.doJSON(ctx, http.MethodPost, "/api/trash", map[string]any{"fileIds": fileIDs}, nil)
+}
+
+// TrashDeleteForever permanently removes trashed files by id
+// (DELETE /api/trash) — hard delete + blob reclaim, irreversible.
+func (c *Client) TrashDeleteForever(ctx context.Context, fileIDs []string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/api/trash", map[string]any{"fileIds": fileIDs}, nil)
+}
+
 func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error) {
 	// A separate, longer-timeout client. The default 30s on the
 	// JSON client is too tight for multi-MB downloads; bump to
