@@ -453,6 +453,23 @@ func (c *Client) UploadComplete(ctx context.Context, req *UploadCompleteRequest)
 	return out, nil
 }
 
+// DuplicateFile server-side copies a file into folderID (nil = root),
+// reusing the source's wrap material verbatim (POST /api/files/:id/
+// duplicate). Returns the new file's id. No client crypto needed — the
+// server copies the ciphertext blob and the encrypted name as-is.
+func (c *Client) DuplicateFile(ctx context.Context, fileID string, folderID *string) (string, error) {
+	var out struct {
+		File struct {
+			ID string `json:"id"`
+		} `json:"file"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/"+fileID+"/duplicate",
+		map[string]any{"folderId": folderID}, &out); err != nil {
+		return "", err
+	}
+	return out.File.ID, nil
+}
+
 // ---- File / folder mutation ----
 
 // DeleteFile soft-removes a single file. The server handles the R2
