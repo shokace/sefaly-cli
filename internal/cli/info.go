@@ -167,27 +167,34 @@ func trimSpace(s string) string {
 	return s
 }
 
-// authedClient is the shared setup every authenticated command runs:
+// authedClientURL is the shared setup every authenticated command runs:
 // load creds, decrypt the private key, resolve the base URL, build a
-// client. Returns the creds, the (caller-must-zero) private key, and the
-// client. Centralizes the boilerplate that was copy-pasted across
-// commands.
-func authedClient() (*creds.Credentials, []byte, *api.Client, error) {
+// client. Returns the creds, the (caller-must-zero) private key, the
+// client, and the resolved base URL (needed when constructing
+// user-facing links). Centralizes the boilerplate.
+func authedClientURL() (*creds.Credentials, []byte, *api.Client, string, error) {
 	stored, err := creds.Load()
 	if err != nil {
 		if errors.Is(err, creds.ErrNotFound) {
-			return nil, nil, nil, errors.New("not signed in — run `sef login`")
+			return nil, nil, nil, "", errors.New("not signed in — run `sef login`")
 		}
-		return nil, nil, nil, fmt.Errorf("reading credentials: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("reading credentials: %w", err)
 	}
 	privKey, _, err := cryptox.DecryptPrivateKey(stored.AccessToken, stored.UserID, stored.EncryptedPrivateKey)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("decrypting private key (re-login may help): %w", err)
+		return nil, nil, nil, "", fmt.Errorf("decrypting private key (re-login may help): %w", err)
 	}
 	baseURL, err := resolveBaseURL(stored.APIBaseURL)
 	if err != nil {
 		zero(privKey)
-		return nil, nil, nil, err
+		return nil, nil, nil, "", err
 	}
-	return stored, privKey, api.New(baseURL, stored.AccessToken), nil
+	return stored, privKey, api.New(baseURL, stored.AccessToken), baseURL, nil
+}
+
+// authedClient is authedClientURL without the base URL, for the common
+// case where the command doesn't build links.
+func authedClient() (*creds.Credentials, []byte, *api.Client, error) {
+	s, k, c, _, err := authedClientURL()
+	return s, k, c, err
 }

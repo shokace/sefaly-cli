@@ -522,6 +522,82 @@ func EncryptFileForUpload(
 	}, nil
 }
 
+// --- Sharing ---
+
+// RecipientWrap is the wire bundle for a direct user share — the three
+// base64 fields POST /api/files/:id/share validates.
+type RecipientWrap struct {
+	EncapsulatedKeyB64 string
+	WrappedKeyB64      string
+	KeyWrapNonceB64    string
+}
+
+// WrapFileKeyForRecipient ML-KEM-768-wraps a 32-byte file key against a
+// recipient's public key (base64). Mirrors the web app's
+// wrapFileKeyForRecipient (sharing.ts): encap → HKDF(salt=encapsulatedKey,
+// info="sefaly-file-key-wrap-v1") → AES-GCM wrap. The recipient unwraps
+// with their own private key exactly like UnwrapFileKey.
+func WrapFileKeyForRecipient(fileKey []byte, recipientPublicKeyB64 string) (*RecipientWrap, error) {
+	if len(fileKey) != 32 {
+		return nil, errors.New("file key must be 32 bytes")
+	}
+	pkBytes, err := base64.StdEncoding.DecodeString(recipientPublicKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding recipient public key: %w", err)
+	}
+	if len(pkBytes) != mlkem768.PublicKeySize {
+		return nil, fmt.Errorf("recipient public key must be %d bytes, got %d", mlkem768.PublicKeySize, len(pkBytes))
+	}
+	var pk mlkem768.PublicKey
+	if err := pk.Unpack(pkBytes); err != nil {
+		return nil, fmt.Errorf("parsing recipient public key: %w", err)
+	}
+	b, err := wrapKeyForRecipient(fileKey, &pk)
+	if err != nil {
+		return nil, err
+	}
+	return &RecipientWrap{
+		EncapsulatedKeyB64: b.EncapsulatedKeyB64,
+		WrappedKeyB64:      b.WrappedKeyB64,
+		KeyWrapNonceB64:    b.KeyWrapNonceB64,
+	}, nil
+}
+
+// GenerateLinkKey mints a fresh 32-byte public-link key. Never reuse one
+// across links; it lives only in the URL fragment, never on the server.
+func GenerateLinkKey() ([]byte, error) {
+	k := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, k); err != nil {
+		return nil, fmt.Errorf("reading randomness for link key: %w", err)
+	}
+	return k, nil
+}
+
+// LinkKeyToFragment encodes a link key as the base64url (no padding) form
+// the web's linkKeyFromFragment expects in `…/s/<token>#<fragment>`.
+func LinkKeyToFragment(linkKey []byte) string {
+	return base64.RawURLEncoding.EncodeToString(linkKey)
+}
+
+// EncryptForPublicLink AES-256-GCM-encrypts `plaintext` (the file key for
+// a single-file link, or a JSON manifest for a folder link) under the
+// link key, returning base64 (encryptedPayload, payloadNonce). Mirrors
+// the web's encryptForPublicLink — no AAD, fresh 12-byte nonce.
+func EncryptForPublicLink(plaintext, linkKey []byte) (encryptedPayloadB64, payloadNonceB64 string, err error) {
+	if len(linkKey) != 32 {
+		return "", "", errors.New("link key must be 32 bytes")
+	}
+	nonce := make([]byte, aesGCMNonceLen)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", "", fmt.Errorf("reading randomness for payload nonce: %w", err)
+	}
+	ct, err := aesGCMSeal(linkKey, nonce, plaintext, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("encrypting public-link payload: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(ct), base64.StdEncoding.EncodeToString(nonce), nil
+}
+
 // DecryptName decrypts an AES-GCM-encrypted filename or folder name
 // with the file/folder key. No AAD — the wire format encrypts names
 // without one (different from the device-flow privateKey blob, which

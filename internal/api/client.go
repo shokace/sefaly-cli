@@ -593,6 +593,108 @@ func (c *Client) TrashDeleteForever(ctx context.Context, fileIDs []string) error
 	return c.doJSON(ctx, http.MethodDelete, "/api/trash", map[string]any{"fileIds": fileIDs}, nil)
 }
 
+// ---- Sharing ----
+
+// LookupPublicKey resolves a recipient's user id + ML-KEM public key by
+// email (POST /api/users/lookup-public-key). 404 → no Sefaly account.
+func (c *Client) LookupPublicKey(ctx context.Context, email string) (recipientID, publicKeyB64 string, err error) {
+	var out struct {
+		Recipient struct {
+			ID        string `json:"id"`
+			Email     string `json:"email"`
+			PublicKey string `json:"publicKey"`
+		} `json:"recipient"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/users/lookup-public-key",
+		map[string]string{"email": email}, &out); err != nil {
+		return "", "", err
+	}
+	return out.Recipient.ID, out.Recipient.PublicKey, nil
+}
+
+// ShareFileWithUser creates a direct FileShare to a registered user
+// (POST /api/files/:id/share) using a per-recipient ML-KEM wrap.
+func (c *Client) ShareFileWithUser(ctx context.Context, fileID, recipientID, encapsulatedKey, wrappedFileKey, keyWrapNonce string) error {
+	return c.doJSON(ctx, http.MethodPost, "/api/files/"+fileID+"/share", map[string]string{
+		"recipientId":     recipientID,
+		"encapsulatedKey": encapsulatedKey,
+		"wrappedFileKey":  wrappedFileKey,
+		"keyWrapNonce":    keyWrapNonce,
+	}, nil)
+}
+
+// PublicLinkOptions are the optional knobs for a public link. Nil/zero =
+// server default (tier-capped TTL, unlimited downloads, random token).
+type PublicLinkOptions struct {
+	ExpiresInDays *int
+	MaxDownloads  *int
+	CustomSlug    string
+}
+
+// CreateFilePublicLink creates an anonymous public link for a file
+// (POST /api/files/:id/share/public). The link key is NOT sent — only
+// the payload encrypted under it. Returns (token, slug) for building the
+// `/s/<slug-or-token>#<linkKey>` URL.
+func (c *Client) CreateFilePublicLink(ctx context.Context, fileID, encryptedPayload, payloadNonce string, opt PublicLinkOptions) (token, slug string, err error) {
+	body := map[string]any{"encryptedPayload": encryptedPayload, "payloadNonce": payloadNonce}
+	if opt.ExpiresInDays != nil {
+		body["expiresInDays"] = *opt.ExpiresInDays
+	}
+	if opt.MaxDownloads != nil {
+		body["maxDownloads"] = *opt.MaxDownloads
+	}
+	if opt.CustomSlug != "" {
+		body["customSlug"] = opt.CustomSlug
+	}
+	var out struct {
+		Link struct {
+			Token      string  `json:"token"`
+			CustomSlug *string `json:"customSlug"`
+		} `json:"link"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/"+fileID+"/share/public", body, &out); err != nil {
+		return "", "", err
+	}
+	s := ""
+	if out.Link.CustomSlug != nil {
+		s = *out.Link.CustomSlug
+	}
+	return out.Link.Token, s, nil
+}
+
+// OutgoingShares is the caller's outbound share inventory.
+type OutgoingShares struct {
+	Files []struct {
+		ID            string `json:"id"`
+		RecipientEmail string `json:"recipientEmail"`
+	} `json:"files"`
+	Folders []struct {
+		ID            string `json:"id"`
+		RecipientEmail string `json:"recipientEmail"`
+		FileCount     int    `json:"fileCount"`
+	} `json:"folders"`
+	PublicLinks []struct {
+		ID         string  `json:"id"`
+		Token      string  `json:"token"`
+		CustomSlug *string `json:"customSlug"`
+	} `json:"publicLinks"`
+}
+
+func (c *Client) ListOutgoingShares(ctx context.Context) (*OutgoingShares, error) {
+	out := &OutgoingShares{}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/shares/outgoing", nil, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RevokePublicLink revokes a public link by id (DELETE
+// /api/public-links/:id). Sets revokedAt server-side; the token + any
+// custom slug stop working immediately.
+func (c *Client) RevokePublicLink(ctx context.Context, linkID string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/api/public-links/"+linkID, nil, nil)
+}
+
 func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error) {
 	// A separate, longer-timeout client. The default 30s on the
 	// JSON client is too tight for multi-MB downloads; bump to
