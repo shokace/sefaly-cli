@@ -248,7 +248,9 @@ func atomicWriteFile(path string, data []byte) error {
 		cleanup()
 		return err
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	// 0600: a freshly-decrypted plaintext shouldn't be world-readable on
+	// a shared/multi-user host.
+	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		cleanup()
 		return err

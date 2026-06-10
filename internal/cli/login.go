@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/shokace/sefaly-cli/internal/api"
@@ -13,6 +15,31 @@ import (
 	"github.com/shokace/sefaly-cli/internal/cryptox"
 	"github.com/spf13/cobra"
 )
+
+// validVerificationURL returns `raw` if it's a safe verification URL to
+// print + auto-open: same scheme as the API base (https in prod; http
+// only for a loopback dev base) AND the exact same host. Returns "" if
+// the server tried to point us anywhere else (phishing / scheme abuse).
+func validVerificationURL(raw, baseURL string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	b, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != b.Scheme {
+		return ""
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Host)) {
+		return ""
+	}
+	if !strings.EqualFold(u.Host, b.Host) {
+		return ""
+	}
+	return raw
+}
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
@@ -64,11 +91,25 @@ Devices panel on the web app.`,
 		}
 
 		// Step 3: show the code + URL, try to open the browser.
-		fmt.Printf("\n  To authorize this device, open:\n    %s\n\n", dc.VerificationURIComplete)
+		//
+		// The verification URL is server-controlled. Since the whole
+		// point of the protocol is that the server is untrusted, we
+		// refuse to hand it to the OS URL opener unless it's https and
+		// on the SAME host we're talking to — otherwise a malicious or
+		// compromised server could auto-launch a phishing page or a
+		// non-http scheme (file://, custom protocol handler). On a
+		// mismatch we still tell the user, but don't open or trust it.
+		safeURL := validVerificationURL(dc.VerificationURIComplete, baseURL)
+		if safeURL == "" {
+			fmt.Printf("\n  The server returned an unexpected verification URL and we won't open it:\n    %s\n", dc.VerificationURIComplete)
+			fmt.Printf("  Expected a link on %s. Aborting for your safety — if this persists, the server may be misconfigured.\n\n", baseURL)
+			return errors.New("refusing an off-origin verification URL")
+		}
+		fmt.Printf("\n  To authorize this device, open:\n    %s\n\n", safeURL)
 		fmt.Printf("  And confirm the code:\n    %s\n\n", dc.UserCode)
 
 		if !loginNoBrowser {
-			if err := openBrowser(dc.VerificationURIComplete); err != nil {
+			if err := openBrowser(safeURL); err != nil {
 				// Not fatal — the URL is printed above and the user
 				// can open it themselves.
 				fmt.Printf("  (couldn't open the browser automatically: %v)\n\n", err)

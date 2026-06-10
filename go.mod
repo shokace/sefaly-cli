@@ -1,6 +1,6 @@
 module github.com/shokace/sefaly-cli
 
-go 1.26
+go 1.26.4
 
 require (
 	github.com/99designs/keyring v1.2.2

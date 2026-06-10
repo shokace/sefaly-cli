@@ -12,8 +12,54 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
+
+const (
+	// maxJSONResponse caps doJSON body reads — a backstop against a
+	// malicious or buggy server streaming unbounded data. Real API
+	// responses (even a large file tree) are far smaller.
+	maxJSONResponse = 64 << 20 // 64 MiB
+	// maxCiphertextResponse caps a single file download. Whole-file
+	// in-memory decrypt already bounds practical size; this stops an
+	// infinite/oversized stream from exhausting memory.
+	maxCiphertextResponse = 16 << 30 // 16 GiB
+)
+
+// noDowngradeRedirect permits ordinary redirects but refuses any that
+// drop https→http — which would otherwise put a presigned URL's
+// signature, or uploaded ciphertext, on the wire in cleartext — and
+// caps the chain length.
+func noDowngradeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-https %q", req.URL.String())
+	}
+	return nil
+}
+
+// requireSecureURL rejects a storage URL that isn't https (loopback
+// http allowed for local dev). A compromised API server could otherwise
+// hand us an http:// or off-scheme download/upload URL.
+func requireSecureURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid storage URL: %w", err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing non-https storage URL (scheme %q)", u.Scheme)
+}
 
 // DefaultBaseURL is the canonical Sefaly host. The CLI talks to the
 // www variant directly so it doesn't depend on the apex → www
@@ -121,7 +167,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONResponse))
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
 	}
@@ -381,7 +427,10 @@ func (c *Client) UploadInit(ctx context.Context, req *UploadInitRequest) (*Uploa
 // Content-Type the browser uses: application/octet-stream, so the
 // original mimetype isn't leaked to network observers.
 func (c *Client) UploadPut(ctx context.Context, url string, ciphertext []byte) error {
-	dl := &http.Client{Timeout: 10 * time.Minute}
+	if err := requireSecureURL(url); err != nil {
+		return err
+	}
+	dl := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: noDowngradeRedirect}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(ciphertext))
 	if err != nil {
 		return fmt.Errorf("building PUT request: %w", err)
@@ -696,12 +745,15 @@ func (c *Client) RevokePublicLink(ctx context.Context, linkID string) error {
 }
 
 func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error) {
+	if err := requireSecureURL(url); err != nil {
+		return nil, err
+	}
 	// A separate, longer-timeout client. The default 30s on the
 	// JSON client is too tight for multi-MB downloads; bump to
 	// 10 min which covers anything reasonable while still bounding
-	// hangs. Per-request override is fine — we don't share state
-	// with the JSON path.
-	dl := &http.Client{Timeout: 10 * time.Minute}
+	// hangs. Refuse https→http redirects so a presigned URL can't be
+	// bounced onto a cleartext hop.
+	dl := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: noDowngradeRedirect}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -722,9 +774,12 @@ func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error
 		}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCiphertextResponse))
 	if err != nil {
 		return nil, fmt.Errorf("reading ciphertext: %w", err)
+	}
+	if int64(len(body)) == maxCiphertextResponse {
+		return nil, fmt.Errorf("download exceeds the maximum supported size (%d bytes)", int64(maxCiphertextResponse))
 	}
 	return body, nil
 }
