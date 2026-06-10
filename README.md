@@ -11,10 +11,11 @@ the tradition of `gh`, `fly`, `aws`. The project is still called
 Sefaly everywhere else (repo, brand, docs); only the typed command
 is shortened.
 
-> **Status:** early v0.x. The full file-ops set works today:
-> `login` / `logout` / `whoami` / `ls` / `download` / `upload` /
-> `rm` / `mkdir` / `mv`. Distribution via Homebrew / Scoop / AUR
-> is next.
+> **Status:** v0.x. Full file management + sharing + an interactive
+> shell. Account settings (billing, storage plan, account deletion,
+> 2FA setup) live on the web app by design — the CLI never mutates
+> account state. Folder sharing and consuming shares others sent you
+> are on the web app for now.
 
 ## Install
 
@@ -46,8 +47,8 @@ mv sef /usr/local/bin/
 sef --help
 ```
 
-Requires Go 1.26+ (we use the standard library's `crypto/mlkem` and
-`crypto/hkdf`).
+Requires Go 1.26.4+ (we use the standard library's `crypto/mlkem` and
+`crypto/hkdf`; 1.26.4 also carries the latest stdlib security fixes).
 
 ### Windows
 
@@ -73,6 +74,67 @@ sef ls
 sef logout
 # → clears local credentials
 ```
+
+Run `sef` with no arguments on a terminal to drop into the interactive
+shell (see below); pipe it or redirect it and you get a plain command
+summary instead.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `sef login` / `logout` / `whoami` | Authorize this device, sign out, show the account + storage |
+| `sef ls [path]` | List a folder (`--long` for size/time, `--tree` recursive) |
+| `sef put <file>… [--to <folder>]` | Encrypt + upload files (alias `upload`) |
+| `sef get <path> [-o <dest>]` | Download + decrypt a file (alias `download`) |
+| `sef mkdir <path> [-p]` | Create a folder |
+| `sef mv <src> <dst>` | Move or rename (end-to-end re-encrypts the name) |
+| `sef cp <src> <dst>` | Server-side copy a file (+ rename) |
+| `sef rm <path>… [-r] [-f]` | Delete (files → Trash, folders permanent) |
+| `sef info <path>` | File/folder details (size, path, encryption, id) |
+| `sef trash` | List Trash; `restore` / `rm` / `empty` subcommands |
+| `sef share <file>` | Create a public link or `--to <email>` direct share |
+| `sef shell` | Interactive cloud session |
+
+Paths are slash-separated and mirror your folder hierarchy; filenames
+are decrypted locally for display, never sent in plaintext.
+
+## Interactive shell
+
+`sef shell` (or bare `sef` on a terminal) opens a Claude-Code-style
+session that keeps a current folder, so you can move around your cloud
+like a remote filesystem:
+
+```text
+sefaly / ❯ cd Photos/2026
+sefaly /Photos/2026 ❯ ls
+sefaly /Photos/2026 ❯ get IMG_1234.jpg ~/Desktop
+sefaly /Photos/2026 ❯ put ~/new-shot.jpg
+sefaly /Photos/2026 ❯ share IMG_1234.jpg
+sefaly /Photos/2026 ❯ exit
+```
+
+Supported in-session: `cd`, `ls`, `pwd`, `tree`, `info`, `get`, `put`,
+`mkdir`, `mv`, `cp`, `rm`, `share`, `trash`, `whoami`, `clear`, `help`,
+`exit`. For flags (e.g. `share --to`, `--expires`), use the non-shell
+commands.
+
+## Sharing
+
+```sh
+sef share report.pdf                       # public link (key lives in the URL #fragment)
+sef share report.pdf --expires 7 --max-downloads 5
+sef share report.pdf --slug q3-report      # custom slug (Pro)
+sef share report.pdf --to alex@example.com # end-to-end direct share to a Sefaly user
+sef share ls                               # list your outgoing shares
+sef share revoke <link-id>                 # revoke a public link
+```
+
+Public links generate a fresh 256-bit key, encrypt the file key under
+it, and store only the ciphertext — the key rides in the URL fragment
+(after `#`), which browsers never send to the server, so Sefaly can't
+read your shared file. Direct shares re-wrap the file key to the
+recipient's ML-KEM-768 public key.
 
 ## How the auth works (in short)
 
