@@ -52,6 +52,11 @@ Sign out:      sef logout
 More at https://www.sefaly.com.`,
 	SilenceUsage:  true, // don't dump --help on every error; the error message is enough
 	SilenceErrors: true, // we print our own
+	// Bare `sef` (no subcommand) shows the branded welcome instead of
+	// Cobra's default usage dump. `--help` and subcommands are unaffected.
+	Run: func(cmd *cobra.Command, args []string) {
+		printWelcome()
+	},
 }
 
 func init() {
