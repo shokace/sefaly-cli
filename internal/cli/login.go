@@ -18,8 +18,15 @@ import (
 
 // validVerificationURL returns `raw` if it's a safe verification URL to
 // print + auto-open: same scheme as the API base (https in prod; http
-// only for a loopback dev base) AND the exact same host. Returns "" if
-// the server tried to point us anywhere else (phishing / scheme abuse).
+// only for a loopback dev base) AND on the same site. Returns "" if the
+// server tried to point us anywhere else (phishing / scheme abuse).
+//
+// "Same site" is deliberately a bit looser than an exact host match: the
+// API base is www.sefaly.com (we talk to www to avoid the apex→www
+// redirect, which the no-redirect JSON client would reject), but the
+// server hands back the verification URL on the apex sefaly.com. Those
+// are the same property, so apex↔www and any subdomain of the base's
+// registrable domain are accepted; off-origin hosts are not.
 func validVerificationURL(raw, baseURL string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -35,10 +42,23 @@ func validVerificationURL(raw, baseURL string) string {
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Host)) {
 		return ""
 	}
-	if !strings.EqualFold(u.Host, b.Host) {
+	if !sameSite(u.Hostname(), b.Hostname()) {
 		return ""
 	}
 	return raw
+}
+
+// sameSite reports whether two hostnames belong to the same site: equal
+// after dropping a leading "www.", or one a dot-bounded subdomain of the
+// other. So www.sefaly.com ≡ sefaly.com ≡ auth.sefaly.com, while
+// evil.com, notsefaly.com, and sefaly.com.evil.com are all rejected.
+func sameSite(aHost, bHost string) bool {
+	a := strings.TrimPrefix(strings.ToLower(aHost), "www.")
+	b := strings.TrimPrefix(strings.ToLower(bHost), "www.")
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.HasSuffix(a, "."+b) || strings.HasSuffix(b, "."+a)
 }
 
 func init() {

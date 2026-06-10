@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions correspond to the git tag GoReleaser builds from (e.g. `v0.1.1`).
 
+## [0.1.2] - 2026-06-11
+
+### Fixed
+- `sef login` failed on the default host: the API base is
+  `www.sefaly.com`, but the server returns the device-verification URL on
+  the apex `sefaly.com`, and v0.1.1's strict same-host check (from the
+  F-2 hardening) treated that as off-origin and refused it. Same-site
+  apex/`www` and subdomains of the base's registrable domain are now
+  accepted; genuinely off-origin URLs are still refused.
+
 ## [0.1.1] - 2026-06-11
 
 A Claude-Code-style overhaul: a branded interactive experience, full
@@ -73,5 +83,6 @@ Initial release.
 - A two-pane file-manager TUI (`sef gui`).
 - GoReleaser cross-platform release pipeline.
 
+[0.1.2]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.0
