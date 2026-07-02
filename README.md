@@ -1,6 +1,6 @@
 # sef — Sefaly CLI
 
-Command-line client for [Sefaly](https://www.sefaly.com), an
+A command-line client for [Sefaly](https://www.sefaly.com), an
 end-to-end-encrypted cloud storage service that uses post-quantum
 cryptography (ML-KEM-768) for key wrapping. Files are encrypted in
 your shell before they leave the machine; the server never has the
