@@ -328,6 +328,25 @@ func (f *File) KeyWrapNonce() string {
 	return f.Nonce
 }
 
+// EncryptionVersion extracts `encryptionMetadata.version` (empty when
+// absent — decrypt paths reject that themselves).
+func (f *File) EncryptionVersion() string {
+	if v, ok := f.EncryptionMetadata["version"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ChunkSizeBytes extracts `encryptionMetadata.chunkSizeBytes`, the
+// plaintext bytes per chunk on chunked (v2.0) files. Returns 0 when
+// absent (v1.x rows); JSON numbers unmarshal as float64.
+func (f *File) ChunkSizeBytes() int {
+	if v, ok := f.EncryptionMetadata["chunkSizeBytes"].(float64); ok && v > 0 {
+		return int(v)
+	}
+	return 0
+}
+
 // TreeResponse is /api/files?tree=1's payload. Only `folders` and
 // `files` are populated today; the `syncedShares` field exists in
 // the schema but the CLI doesn't render shared content yet.
@@ -500,6 +519,143 @@ func (c *Client) UploadComplete(ctx context.Context, req *UploadCompleteRequest)
 		return nil, err
 	}
 	return out, nil
+}
+
+// ---- Multipart upload (chunked format v2.0, large files) ----
+
+// MultipartInitRequest is the POST body for
+// /api/files/upload/multipart/init. sizeBytes is the TOTAL ciphertext
+// size (plaintext + 28 bytes per chunk); partSizeBytes is the uniform
+// encrypted-chunk size (one chunk per part, last part smaller).
+type MultipartInitRequest struct {
+	SizeBytes     int64  `json:"sizeBytes"`
+	FolderID      string `json:"-"` // marshalled as null when empty, like UploadInit
+	PartSizeBytes int    `json:"partSizeBytes"`
+	PartCount     int    `json:"partCount"`
+}
+
+type MultipartInitResponse struct {
+	FileID      string `json:"fileId"`
+	StoragePath string `json:"storagePath"`
+	UploadID    string `json:"uploadId"`
+	// Token is an HMAC binding (fileId, uploadId, this session). The
+	// part / complete-parts / abort endpoints require it back — treat
+	// it like a bearer secret for this one upload.
+	Token string `json:"token"`
+}
+
+func (c *Client) MultipartInit(ctx context.Context, req *MultipartInitRequest) (*MultipartInitResponse, error) {
+	type body struct {
+		SizeBytes     int64   `json:"sizeBytes"`
+		FolderID      *string `json:"folderId"`
+		PartSizeBytes int     `json:"partSizeBytes"`
+		PartCount     int     `json:"partCount"`
+	}
+	b := body{SizeBytes: req.SizeBytes, PartSizeBytes: req.PartSizeBytes, PartCount: req.PartCount}
+	if req.FolderID != "" {
+		fid := req.FolderID
+		b.FolderID = &fid
+	}
+	out := &MultipartInitResponse{}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/upload/multipart/init", &b, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MultipartPartURL mints a presigned PUT URL for one part (1-based
+// partNumber). The layout is re-sent so the server can derive and
+// signature-bind the part's exact Content-Length.
+func (c *Client) MultipartPartURL(
+	ctx context.Context,
+	init *MultipartInitResponse,
+	partNumber, partSizeBytes, partCount int,
+) (string, error) {
+	var out struct {
+		URL string `json:"url"`
+	}
+	body := map[string]any{
+		"fileId":        init.FileID,
+		"uploadId":      init.UploadID,
+		"token":         init.Token,
+		"partNumber":    partNumber,
+		"partSizeBytes": partSizeBytes,
+		"partCount":     partCount,
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/files/upload/multipart/part", body, &out); err != nil {
+		return "", err
+	}
+	return out.URL, nil
+}
+
+// MultipartPart pairs a part number with the ETag R2 returned for it.
+type MultipartPart struct {
+	PartNumber int    `json:"partNumber"`
+	ETag       string `json:"etag"`
+}
+
+// MultipartCompleteParts stitches the uploaded parts into the final
+// object (CompleteMultipartUpload). The regular UploadComplete call
+// follows it to commit the File row.
+func (c *Client) MultipartCompleteParts(
+	ctx context.Context,
+	init *MultipartInitResponse,
+	parts []MultipartPart,
+) error {
+	body := map[string]any{
+		"fileId":   init.FileID,
+		"uploadId": init.UploadID,
+		"token":    init.Token,
+		"parts":    parts,
+	}
+	return c.doJSON(ctx, http.MethodPost, "/api/files/upload/multipart/complete-parts", body, nil)
+}
+
+// MultipartAbort discards an in-progress multipart upload and frees
+// its quota reservation. Best-effort cleanup on failure paths — the
+// server's reap cron sweeps anything this misses.
+func (c *Client) MultipartAbort(ctx context.Context, init *MultipartInitResponse) error {
+	body := map[string]any{
+		"fileId":   init.FileID,
+		"uploadId": init.UploadID,
+		"token":    init.Token,
+	}
+	return c.doJSON(ctx, http.MethodPost, "/api/files/upload/multipart/abort", body, nil)
+}
+
+// UploadPutPart PUTs one encrypted chunk to a presigned part URL and
+// returns the ETag R2 answered with (required by
+// MultipartCompleteParts). Same security posture as UploadPut.
+func (c *Client) UploadPutPart(ctx context.Context, url string, part []byte) (string, error) {
+	if err := requireSecureURL(url); err != nil {
+		return "", err
+	}
+	dl := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: noDowngradeRedirect}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(part))
+	if err != nil {
+		return "", fmt.Errorf("building part PUT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(part))
+	req.Header.Set("User-Agent", UserAgent)
+
+	resp, err := dl.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("PUT part: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", &APIError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("storage part PUT failed (%d): %s", resp.StatusCode, string(body)),
+		}
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return "", errors.New("storage did not return a part ETag")
+	}
+	return etag, nil
 }
 
 // DuplicateFile server-side copies a file into folderID (nil = root),
@@ -742,6 +898,38 @@ func (c *Client) ListOutgoingShares(ctx context.Context) (*OutgoingShares, error
 // custom slug stop working immediately.
 func (c *Client) RevokePublicLink(ctx context.Context, linkID string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/api/public-links/"+linkID, nil, nil)
+}
+
+// FetchCiphertextStream is the streaming sibling of FetchCiphertext,
+// for chunked (v2.0) files where the ciphertext must NOT be buffered
+// whole (it can be hundreds of GB). The caller owns closing the
+// returned body. Same security posture as FetchCiphertext: https-only,
+// no downgrade redirects, no Bearer header (auth is in the URL).
+func (c *Client) FetchCiphertextStream(ctx context.Context, url string) (io.ReadCloser, error) {
+	if err := requireSecureURL(url); err != nil {
+		return nil, err
+	}
+	// No overall timeout: a 100 GB download legitimately runs for
+	// hours. The context cancels it, and TCP failures surface as read
+	// errors in the decrypt loop.
+	dl := &http.Client{CheckRedirect: noDowngradeRedirect}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building download request: %w", err)
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	resp, err := dl.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return nil, &APIError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("GET %s: storage backend returned %d", url, resp.StatusCode),
+		}
+	}
+	return resp.Body, nil
 }
 
 func (c *Client) FetchCiphertext(ctx context.Context, url string) ([]byte, error) {

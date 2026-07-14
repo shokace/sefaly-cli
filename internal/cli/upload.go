@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime"
 	"os"
@@ -283,15 +284,6 @@ func uploadOne(
 	publicKeyB64 string,
 	displayName string,
 ) error {
-	// Read once into memory. Streaming AES-GCM seal exists but the
-	// AEAD interface here doesn't expose it, and the upload PUT
-	// needs a known Content-Length anyway — that's set when we
-	// sign the presigned URL.
-	plaintext, err := os.ReadFile(localPath)
-	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
-	}
-
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
@@ -313,6 +305,22 @@ func uploadOne(
 	mimeType := mime.TypeByExtension(filepath.Ext(basename))
 	if mt, _, err := mime.ParseMediaType(mimeType); err == nil {
 		mimeType = mt
+	}
+
+	// Large files take the chunked multipart path (format v2.0): the
+	// file is never read whole into memory, and R2's 5 GB single-PUT
+	// ceiling doesn't apply. Matches the web client's threshold.
+	if info.Size() > cryptox.MultipartThresholdBytes {
+		return uploadOneChunked(parentCtx, client, localPath, folderID, publicKeyB64, basename, mimeType, info.Size())
+	}
+
+	// Read once into memory. Streaming AES-GCM seal exists but the
+	// AEAD interface here doesn't expose it, and the upload PUT
+	// needs a known Content-Length anyway — that's set when we
+	// sign the presigned URL.
+	plaintext, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
 	}
 
 	fmt.Printf("  Encrypting %s (%s)…\n", basename, prettySize(int64(len(plaintext))))
@@ -371,6 +379,180 @@ func uploadOne(
 		},
 	})
 	if err != nil {
+		return fmt.Errorf("complete: %w", err)
+	}
+
+	fmt.Printf("  ✓ Uploaded %s (id=%s)\n", basename, resp.File.ID)
+	return nil
+}
+
+// uploadOneChunked is uploadOne's large-file path: chunked encryption
+// (format v2.0) + R2 multipart. The file streams from disk one 32 MiB
+// chunk at a time — read → encrypt → PUT as one part — so memory stays
+// flat regardless of file size. Each part retries with a fresh
+// presigned URL before the whole upload is declared failed, and any
+// failure after init aborts the multipart upload server-side so the
+// quota reservation frees immediately instead of waiting for the
+// reap cron.
+func uploadOneChunked(
+	parentCtx context.Context,
+	client *api.Client,
+	localPath string,
+	folderID *string,
+	publicKeyB64 string,
+	basename string,
+	mimeType string,
+	plaintextSize int64,
+) error {
+	const putAttempts = 3
+	chunkSize := cryptox.DefaultChunkSizeBytes
+
+	partCount, err := cryptox.ChunkCount(plaintextSize, chunkSize)
+	if err != nil {
+		return err
+	}
+	if partCount > cryptox.MaxMultipartParts {
+		return fmt.Errorf(
+			"file is too large to upload (max %s)",
+			prettySize(int64(cryptox.MaxMultipartParts)*int64(chunkSize)),
+		)
+	}
+	totalCipherBytes, err := cryptox.CiphertextSizeForPlaintext(plaintextSize, chunkSize)
+	if err != nil {
+		return err
+	}
+	encPartSize := chunkSize + cryptox.ChunkOverheadBytes
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer f.Close()
+
+	// Key ceremony only — content encrypts chunk-by-chunk below.
+	prep, err := cryptox.PrepareChunkedUpload(basename, publicKeyB64, chunkSize)
+	if err != nil {
+		return fmt.Errorf("preparing keys: %w", err)
+	}
+	defer zero(prep.FileKey)
+
+	initCtx, initCancel := context.WithTimeout(parentCtx, 30*time.Second)
+	init, err := client.MultipartInit(initCtx, &api.MultipartInitRequest{
+		SizeBytes:     totalCipherBytes,
+		FolderID:      derefOr(folderID, ""),
+		PartSizeBytes: encPartSize,
+		PartCount:     partCount,
+	})
+	initCancel()
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+
+	// From here on, any failure should free the reservation + discard
+	// parts. Best-effort with its own context — parentCtx may already
+	// be canceled (Ctrl-C), and cleanup shouldn't die with it.
+	abort := func() {
+		abortCtx, abortCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer abortCancel()
+		_ = client.MultipartAbort(abortCtx, init)
+	}
+
+	fmt.Printf("  Uploading %s (%s, %d parts)…\n", basename, prettySize(plaintextSize), partCount)
+	parts := make([]api.MultipartPart, 0, partCount)
+	buf := make([]byte, chunkSize)
+	for i := 0; i < partCount; i++ {
+		isLast := i == partCount-1
+		expected := chunkSize
+		if isLast {
+			expected = int(plaintextSize - int64(partCount-1)*int64(chunkSize))
+		}
+		n, readErr := io.ReadFull(f, buf[:expected])
+		if readErr != nil || n != expected {
+			// Also catches the file shrinking mid-upload: better to
+			// fail loudly than commit a blob that won't decrypt.
+			abort()
+			return fmt.Errorf("reading chunk %d/%d (did the file change?): %w", i+1, partCount, readErr)
+		}
+		encChunk, err := cryptox.EncryptChunk(prep.FileKey, buf[:n], i, isLast)
+		if err != nil {
+			abort()
+			return fmt.Errorf("encrypting chunk %d: %w", i+1, err)
+		}
+
+		var lastErr error
+		for attempt := 1; attempt <= putAttempts; attempt++ {
+			if parentCtx.Err() != nil {
+				abort()
+				return parentCtx.Err()
+			}
+			// Fresh URL per attempt — the previous one may have
+			// expired while earlier parts uploaded.
+			urlCtx, urlCancel := context.WithTimeout(parentCtx, 30*time.Second)
+			url, err := client.MultipartPartURL(urlCtx, init, i+1, encPartSize, partCount)
+			urlCancel()
+			if err != nil {
+				lastErr = fmt.Errorf("part %d URL: %w", i+1, err)
+				continue
+			}
+			putCtx, putCancel := context.WithTimeout(parentCtx, 10*time.Minute)
+			etag, err := client.UploadPutPart(putCtx, url, encChunk)
+			putCancel()
+			if err != nil {
+				lastErr = fmt.Errorf("part %d PUT: %w", i+1, err)
+				continue
+			}
+			parts = append(parts, api.MultipartPart{PartNumber: i + 1, ETag: etag})
+			lastErr = nil
+			break
+		}
+		if lastErr != nil {
+			abort()
+			return lastErr
+		}
+		uploadedCipher := int64(i+1) * int64(encPartSize)
+		if uploadedCipher > totalCipherBytes {
+			uploadedCipher = totalCipherBytes // last part is smaller
+		}
+		fmt.Printf("\r  Uploaded %s / %s (%d%%)   ",
+			prettySize(uploadedCipher), prettySize(totalCipherBytes), ((i+1)*100)/partCount)
+	}
+	fmt.Println()
+
+	// Stitch the parts into the final object, then commit the File row
+	// through the SAME complete endpoint small uploads use.
+	stitchCtx, stitchCancel := context.WithTimeout(parentCtx, 60*time.Second)
+	err = client.MultipartCompleteParts(stitchCtx, init, parts)
+	stitchCancel()
+	if err != nil {
+		abort()
+		return fmt.Errorf("assembling parts: %w", err)
+	}
+
+	completeCtx, completeCancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer completeCancel()
+	resp, err := client.UploadComplete(completeCtx, &api.UploadCompleteRequest{
+		FileID:            init.FileID,
+		StoragePath:       init.StoragePath,
+		OriginalFilename:  nil,
+		EncryptedFilename: prep.EncryptedFilenameB64,
+		FilenameNonce:     prep.FilenameNonceB64,
+		MimeType:          stringPtrOrNil(mimeType),
+		FolderID:          folderID,
+		EncapsulatedKey:   prep.EncapsulatedKeyB64,
+		WrappedFileKey:    prep.WrappedFileKeyB64,
+		Nonce:             prep.NonceB64,
+		KeyWrapNonce:      prep.KeyWrapNonceB64,
+		EncryptionMetadata: map[string]interface{}{
+			"algorithm":      "AES-256-GCM",
+			"kemType":        "ML-KEM-768",
+			"version":        cryptox.ChunkedEncryptionVersion,
+			"chunkSizeBytes": prep.ChunkSizeBytes,
+		},
+	})
+	if err != nil {
+		// The object is assembled but the row didn't commit — do NOT
+		// abort (there's no multipart upload anymore); the server's
+		// reservation + reap flow owns cleanup from here.
 		return fmt.Errorf("complete: %w", err)
 	}
 

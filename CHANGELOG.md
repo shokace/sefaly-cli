@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions correspond to the git tag GoReleaser builds from (e.g. `v0.1.1`).
 
+## [0.2.0] - 2026-07-15
+
+Large-file support: the CLI now speaks the chunked encryption format
+(v2.0) the web app ships for files over 256 MB, in both directions.
+
+### Added
+- Chunked encryption format v2.0 (`internal/cryptox/chunked.go`):
+  per-chunk AES-256-GCM with embedded nonces and position-bound AAD
+  (chunk index + last-chunk flag), byte-compatible with the web app.
+  Verified both directions against the production TypeScript
+  implementation via a checked-in cross-language test vector
+  (`testdata/chunked_v2_fixture.json`).
+- `sef put` uploads files over 256 MB via the chunked multipart flow:
+  streamed from disk one 32 MiB chunk at a time (flat memory), one R2
+  part per chunk, per-part retry with fresh presigned URLs, best-effort
+  server-side abort on failure. Removes the previous ~5 GB practical
+  ceiling; the format tops out around 312 GB per file.
+- `sef get` decrypts chunked (v2.0) files, streaming ciphertext →
+  decrypt → disk with at most two chunks in memory. Atomic writes:
+  a failed or tampered download never leaves partial plaintext behind.
+
+### Changed
+- Downloads of chunked files run without the 10-minute overall
+  deadline (multi-hour transfers are legitimate); Ctrl-C still cancels.
+  v1.x downloads keep the existing bound.
+
 ## [0.1.4] - 2026-06-11
 
 Make the CLI scriptable + agent-friendly, so a tool like Claude Code can
@@ -114,6 +140,7 @@ Initial release.
 - A two-pane file-manager TUI (`sef gui`).
 - GoReleaser cross-platform release pipeline.
 
+[0.2.0]: https://github.com/shokace/sefaly-cli/releases/tag/v0.2.0
 [0.1.4]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/shokace/sefaly-cli/releases/tag/v0.1.2

@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,10 +107,18 @@ your private key.`,
 
 		// 3-7. Get the URL + wrap material, download, unwrap, decrypt,
 		// and write atomically — shared with the interactive shell.
+		// Chunked (v2.0) files stream with no overall deadline: a
+		// 100 GB download legitimately runs for hours (Ctrl-C still
+		// cancels via the command context). v1.x whole-file downloads
+		// keep the 10-minute bound.
 		fmt.Printf("  Downloading %s…\n", decryptedName)
-		dlCtx, dlCancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
-		defer dlCancel()
-		n, err := downloadFileTo(dlCtx, client, privKey, file.ID, outPath)
+		dlCtx := cmd.Context()
+		if !cryptox.IsChunkedVersion(file.EncryptionVersion()) {
+			var dlCancel context.CancelFunc
+			dlCtx, dlCancel = context.WithTimeout(cmd.Context(), 10*time.Minute)
+			defer dlCancel()
+		}
+		n, err := downloadFileTo(dlCtx, client, privKey, file.ID, file.ChunkSizeBytes(), outPath)
 		if err != nil {
 			return err
 		}
@@ -122,7 +132,12 @@ your private key.`,
 // id, writing the plaintext to outPath atomically and returning the
 // byte count. Shared by the `download` command and the interactive
 // shell. The caller picks outPath + enforces any overwrite policy first.
-func downloadFileTo(ctx context.Context, client *api.Client, privKey []byte, fileID, outPath string) (int, error) {
+//
+// chunkSizeBytes is the file row's encryptionMetadata.chunkSizeBytes
+// (0 for v1.x files, which ignore it). Chunked (v2.0) files stream
+// ciphertext → decrypt → disk holding at most two chunks in memory;
+// v1.x files keep the historical whole-file path.
+func downloadFileTo(ctx context.Context, client *api.Client, privKey []byte, fileID string, chunkSizeBytes int, outPath string) (int64, error) {
 	info, err := client.FileURL(ctx, fileID)
 	if err != nil {
 		return 0, fmt.Errorf("requesting download URL: %w", err)
@@ -131,15 +146,37 @@ func downloadFileTo(ctx context.Context, client *api.Client, privKey []byte, fil
 		return 0, errors.New("server didn't return wrap material — share-recipient downloads not implemented yet")
 	}
 	wrap := info.OwnerWrap
-	ciphertext, err := client.FetchCiphertext(ctx, info.DownloadURL)
-	if err != nil {
-		return 0, fmt.Errorf("downloading ciphertext: %w", err)
-	}
+
 	fileKey, err := cryptox.UnwrapFileKey(privKey, wrap.EncapsulatedKey, wrap.WrappedFileKey, wrap.KeyWrapNonce)
 	if err != nil {
 		return 0, fmt.Errorf("unwrapping file key: %w", err)
 	}
 	defer zero(fileKey)
+
+	if cryptox.IsChunkedVersion(wrap.EncryptionVersion) {
+		if chunkSizeBytes <= 0 {
+			// Defensive fallback — the server always stores the value
+			// for v2.0 rows; the writer constant matches the web app.
+			chunkSizeBytes = cryptox.DefaultChunkSizeBytes
+		}
+		body, err := client.FetchCiphertextStream(ctx, info.DownloadURL)
+		if err != nil {
+			return 0, fmt.Errorf("downloading ciphertext: %w", err)
+		}
+		defer body.Close()
+		n, err := atomicWriteStream(outPath, func(w io.Writer) (int64, error) {
+			return cryptox.DecryptChunkedStream(fileKey, chunkSizeBytes, body, w)
+		})
+		if err != nil {
+			return 0, fmt.Errorf("decrypting file: %w", err)
+		}
+		return n, nil
+	}
+
+	ciphertext, err := client.FetchCiphertext(ctx, info.DownloadURL)
+	if err != nil {
+		return 0, fmt.Errorf("downloading ciphertext: %w", err)
+	}
 	plaintext, err := cryptox.DecryptFileContent(fileKey, wrap.Nonce, wrap.EncryptionVersion, ciphertext)
 	if err != nil {
 		return 0, fmt.Errorf("decrypting file: %w", err)
@@ -147,7 +184,7 @@ func downloadFileTo(ctx context.Context, client *api.Client, privKey []byte, fil
 	if err := atomicWriteFile(outPath, plaintext); err != nil {
 		return 0, fmt.Errorf("writing %s: %w", outPath, err)
 	}
-	return len(plaintext), nil
+	return int64(len(plaintext)), nil
 }
 
 // resolveFile walks a slash-separated path (folders…/filename),
@@ -230,6 +267,46 @@ func pickOutputPath(out, decryptedName string) (string, error) {
 		}
 	}
 	return out, nil
+}
+
+// atomicWriteStream is atomicWriteFile's streaming sibling: the
+// callback writes plaintext into a same-directory tempfile (0600)
+// that is renamed over the destination only on success. A failed or
+// interrupted decrypt leaves no partial output file behind — which
+// matters more for chunked files, where a truncation attack surfaces
+// as a decrypt error on the FINAL chunk after gigabytes were written.
+func atomicWriteStream(path string, write func(io.Writer) (int64, error)) (int64, error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".sef-download-*")
+	if err != nil {
+		return 0, err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return 0, err
+	}
+	bw := bufio.NewWriterSize(tmp, 1<<20)
+	n, err := write(bw)
+	if err == nil {
+		err = bw.Flush()
+	}
+	if err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return 0, err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return 0, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return 0, err
+	}
+	return n, nil
 }
 
 // atomicWriteFile writes bytes to a tempfile in the same directory
